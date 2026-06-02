@@ -349,26 +349,25 @@ def embed_metadata_video(fname: str, data: bytes, meta: dict) -> tuple:
 
         try:
             # Build ffmpeg command with metadata - use list of arguments to avoid key collision
-            cmd_args = ['ffmpeg', '-i', tmp_in_path, '-c:v', 'copy', '-c:a', 'copy']
+            stream = ffmpeg.input(tmp_in_path)
+            output_kwargs = {'c:v': 'copy', 'c:a': 'copy'}  # Lossless copy
             
             if dt:
                 creation_time = dt.strftime("%Y-%m-%dT%H:%M:%S")
-                cmd_args.extend(['-metadata:g', f'creation_time={creation_time}'])
+                output_kwargs['metadata:g'] = f"creation_time={creation_time}"
             
+            # Note: GPS metadata cannot coexist with creation_time in the same metadata:g key
+            # So we only embed GPS if there's no creation time, or as separate metadata
             if lat is not None and lon is not None:
-                # GPS metadata (format-specific, not all containers support it)
-                gps_str = f"lat={lat:.6f},lon={lon:.6f}"
-                if alt is not None:
-                    gps_str += f",alt={alt:.2f}"
-                cmd_args.extend(['-metadata:g', gps_str])
+                # For video, GPS format is container-specific. Skip if we already set creation_time.
+                if 'metadata:g' not in output_kwargs:
+                    gps_str = f"lat={lat:.6f},lon={lon:.6f}"
+                    if alt is not None:
+                        gps_str += f",alt={alt:.2f}"
+                    output_kwargs['metadata:g'] = gps_str
             
-            cmd_args.extend(['-y', tmp_out_path])
-            
-            # Run ffmpeg directly
-            ffmpeg.run(ffmpeg.input(tmp_in_path)
-                .output(tmp_out_path, c_v='copy', c_a='copy', 
-                       **{'metadata:g': f'creation_time={dt.strftime("%Y-%m-%dT%H:%M:%S")}' if dt else ''})
-                .overwrite_output(), quiet=True)
+            stream = ffmpeg.output(stream, tmp_out_path, **output_kwargs)
+            ffmpeg.run(stream, overwrite_output=True, quiet=True)
 
             # Read modified video
             with open(tmp_out_path, 'rb') as f:
