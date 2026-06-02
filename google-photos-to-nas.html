@@ -22,7 +22,7 @@
   .steps-bar{padding:1rem 2.5rem;display:flex;gap:0;border-bottom:1px solid var(--border);background:var(--surface);overflow-x:auto}
   .step-item{display:flex;align-items:center;gap:.5rem;flex-shrink:0}
   .step-item+.step-item::before{content:'→';color:var(--border-act);margin:0 .6rem;font-size:.65rem}
-  .step-dot{width:20px;height:20px;border-radius:50%;border:1px solid var(--border-act);display:flex;align-items:center;justify-content:center;font-size:.62rem;color:var(--muted);flex-shrink:0;tra[...]
+  .step-dot{width:20px;height:20px;border-radius:50%;border:1px solid var(--border-act);display:flex;align-items:center;justify-content:center;font-size:.62rem;color:var(--muted);flex-shrink:0;transition:all .2s}
   .step-item.active .step-dot{background:var(--accent);border-color:var(--accent);color:#0f0f0f;font-weight:500}
   .step-item.done .step-dot{background:var(--accent-dim);border-color:var(--accent-b);color:var(--accent)}
   .step-label{font-size:.68rem;color:var(--muted)}
@@ -36,7 +36,7 @@
   .card-title{font-size:.68rem;color:var(--accent);letter-spacing:.08em;text-transform:uppercase;margin-bottom:.9rem}
   .field{margin-bottom:.9rem}
   .field label{display:block;font-size:.7rem;color:var(--muted);margin-bottom:.35rem}
-  .field input,.field select{width:100%;background:var(--surface2);border:1px solid var(--border);border-radius:var(--rs);padding:.55rem .8rem;font-family:'DM Mono',monospace;font-size:.8rem;color[...]
+  .field input,.field select{width:100%;background:var(--surface2);border:1px solid var(--border);border-radius:var(--rs);padding:.55rem .8rem;font-family:'DM Mono',monospace;font-size:.8rem;color:var(--text)}
   .field input:focus,.field select:focus{border-color:var(--accent-b)}
   .field input::placeholder{color:var(--muted)}
   .field select option{background:var(--surface2)}
@@ -112,16 +112,19 @@
   <h1>Before we start</h1>
   <p class="sub">Two things you need to enable on your Synology NAS before using this tool.</p>
   <div class="card">
-    <div class="card-title">Enable SSH on your Synology NAS</div>
+    <div class="card-title">Enable SFTP on your Synology NAS</div>
     <div class="guide-step"><div class="guide-num">1</div><div>
-      <div class="guide-text">Open <strong>DSM</strong> → <strong>Control Panel</strong> → <strong>Terminal &amp; SNMP</strong></div>
+      <div class="guide-text">Open <strong>DSM</strong> → <strong>Control Panel</strong> → <strong>File Services</strong></div>
     </div></div>
     <div class="guide-step"><div class="guide-num">2</div><div>
-      <div class="guide-text">Tick <strong>Enable SSH service</strong>. Port defaults to <code>22</code> — leave it unless you changed it.</div>
+      <div class="guide-text">Click the <strong>FTP</strong> tab, then scroll down to the <strong>SFTP</strong> section</div>
     </div></div>
     <div class="guide-step"><div class="guide-num">3</div><div>
+      <div class="guide-text">Tick <strong>Enable SFTP service</strong>. Port defaults to <code>22</code> — leave it unless you changed it.</div>
+      <div class="guide-sub">SFTP is the secure file transfer protocol used by this wizard. You can disable it again after the transfer if you prefer.</div>
+    </div></div>
+    <div class="guide-step"><div class="guide-num">4</div><div>
       <div class="guide-text">Click <strong>Apply</strong>.</div>
-      <div class="guide-sub">SSH is needed for SFTP file transfer. You can disable it again after the transfer if you prefer.</div>
     </div></div>
   </div>
   <div class="card">
@@ -145,10 +148,13 @@
   <div class="card">
     <div class="card-title">Zip file folder path</div>
     <div class="path-row">
-      <input type="text" id="zipFolder" placeholder="e.g. C:\Users\Collins\Downloads\Takeout">
+      <input type="text" id="zipFolder" placeholder="e.g. /Users/collins/Downloads/Takeout">
       <button class="btn btn-secondary btn-sm" onclick="scanFolder()">Scan</button>
     </div>
-    <p style="font-size:.68rem;color:var(--muted);margin-top:.6rem">Copy the path from File Explorer's address bar and paste it here.</p>
+    <p style="font-size:.68rem;color:var(--muted);margin-top:.6rem">
+      <strong>Windows:</strong> <code>C:\Users\Collins\Downloads\Takeout</code><br>
+      <strong>macOS/Linux:</strong> <code>/Users/collins/Downloads/Takeout</code> or <code>/home/collins/Downloads/Takeout</code>
+    </p>
   </div>
   <div id="scanResult" style="display:none"></div>
   <div class="file-list" id="fileList"></div>
@@ -161,11 +167,11 @@
 <!-- 2: NAS -->
 <div class="panel" id="p2">
   <h1>Synology NAS connection</h1>
-  <p class="sub">SFTP uses SSH (port 22 by default). Make sure SSH is enabled in DSM as shown in step 1.</p>
+  <p class="sub">SFTP uses port 22 by default. Make sure SFTP is enabled in DSM as shown in step 1.</p>
   <div class="card">
     <div class="card-title">Connection details</div>
     <div class="field"><label>NAS IP address</label><input type="text" id="nasHost" placeholder="e.g. 192.168.1.100"></div>
-    <div class="field"><label>SSH port</label><input type="number" id="nasPort" value="22"></div>
+    <div class="field"><label>SFTP port</label><input type="number" id="nasPort" value="22"></div>
     <div class="field"><label>Username</label><input type="text" id="nasUser" placeholder="Your DSM username" autocomplete="username"></div>
     <div class="field"><label>Password</label><input type="password" id="nasPass" placeholder="Your DSM password" autocomplete="current-password"></div>
     <div class="field">
@@ -243,7 +249,7 @@
     <div class="guide-step"><div class="guide-num">1</div><div><div class="guide-text">Open <strong>Synology Photos</strong> on your NAS — your photos will appear indexed automatically.</div></div></div>
     <div class="guide-step"><div class="guide-num">2</div><div><div class="guide-text">Install <strong>Synology Photos</strong> on your phone and enable auto-backup for future photos.</div></div></div>
     <div class="guide-step"><div class="guide-num">3</div><div><div class="guide-text">Once confirmed, delete the Takeout zip files from your PC to free up space.</div></div></div>
-    <div class="guide-step"><div class="guide-num">4</div><div><div class="guide-text">You can now disable SSH on the NAS again: DSM → Control Panel → Terminal &amp; SNMP → uncheck Enable SSH.</div></div></div>
+    <div class="guide-step"><div class="guide-num">4</div><div><div class="guide-text">You can now disable SFTP on the NAS again: DSM → Control Panel → File Services → FTP tab → SFTP section → uncheck Enable SFTP.</div></div></div>
   </div>
   <div class="btn-row"><button class="btn btn-secondary" onclick="resetApp()">Start over</button></div>
 </div>
