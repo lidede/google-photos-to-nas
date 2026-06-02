@@ -61,25 +61,11 @@ def set_phase(phase, pct=None):
 
 def find_meta_for(fname, meta_map):
     """
-    Google Takeout names JSON sidecars in several ways.  Try all variants:
-      photo.jpg           → photo.jpg.json  OR  photo.json
-      photo(1).jpg        → photo(1).jpg.json  OR  photo(1).json
-      long_name_trunca…   → truncated stem + .json  (Takeout truncates at 46 chars)
-      photo.jpg.suppl…    → supplemental-metadata variant
+    Direct lookup: try to find metadata for a file by matching its basename
+    in the meta_map. Meta_map keys are media basenames.
     """
-    base   = fname                          # e.g. "IMG_1234.jpg"
-    stem   = os.path.splitext(fname)[0]    # e.g. "IMG_1234"
-
-    candidates = [
-        base,                              # photo.jpg  (key stored as full name)
-        stem,                              # photo
-        base[:46],                         # truncated full name
-        stem[:46],                         # truncated stem
-        re.sub(r'\(\d+\)$', '', stem),     # strip trailing (1) duplicate marker
-    ]
-    for c in candidates:
-        if c in meta_map:
-            return meta_map[c]
+    if fname in meta_map:
+        return meta_map[fname]
     return None
 
 
@@ -543,7 +529,7 @@ def run_transfer(config):
         bg_log(f"Scanning {len(zip_paths)} zip file(s)…", "info")
 
         all_entries = []   # list of (zip_path, ZipInfo)
-        meta_map    = {}   # key → meta dict  (multiple key formats, see find_meta_for)
+        meta_map    = {}   # key: media basename, value: merged metadata dict
 
         for zp in zip_paths:
             zname = os.path.basename(zp)
@@ -555,18 +541,36 @@ def run_transfer(config):
                         ext  = os.path.splitext(name)[1].lower()
 
                         if ext in ALL_EXTS:
+                            # Media file: store it
                             all_entries.append((zp, info))
 
-                        elif name.lower().endswith(".json"):
+                        elif ext == ".json":
+                            # ANY .json file could be metadata
                             try:
                                 raw  = z.read(name)
                                 meta = json.loads(raw.decode("utf-8", errors="ignore"))
-                                if "photoTakenTime" in meta or "creationTime" in meta:
-                                    bname = os.path.basename(name)
-                                    stem  = os.path.splitext(bname)[0]
-                                    # Store under multiple keys to maximise matching
-                                    for key in (bname, stem, bname[:46], stem[:46]):
-                                        meta_map.setdefault(key, meta)
+                                
+                                if isinstance(meta, dict) and len(meta) > 0:
+                                    # Extract the media filename this JSON belongs to
+                                    # Zip path format: Google Photos/Album/IMG_1234.JPG.supplemental-metadata.json
+                                    #           or: Google Photos/Album/IMG_1234.JPG.json
+                                    #           or: Google Photos/Album/IMG_1234.json
+                                    
+                                    json_basename = os.path.basename(name)
+                                    
+                                    # Remove .json extension
+                                    without_json = json_basename[:-5] if json_basename.endswith(".json") else json_basename
+                                    
+                                    # Remove .supplemental-metadata suffix if present
+                                    media_key = without_json.replace(".supplemental-metadata", "")
+                                    
+                                    # media_key is now the media filename (e.g., "IMG_1234.JPG")
+                                    
+                                    # Merge metadata: if we have multiple JSON files for same media, merge them
+                                    if media_key not in meta_map:
+                                        meta_map[media_key] = meta
+                                    else:
+                                        meta_map[media_key].update(meta)
                             except Exception:
                                 pass
             except Exception as e:
@@ -576,7 +580,7 @@ def run_transfer(config):
         with status_lock:
             transfer_status["total"] = total
         bg_log(f"Found {total} photo/video files.", "ok")
-        bg_log(f"Loaded {len(meta_map)} metadata sidecar entries.", "ok")
+        bg_log(f"Loaded {len(meta_map)} metadata entries.", "ok")
         set_phase("Scan complete", 15)
 
         # ── Phase 2: Connect SFTP ─────────────────────────────────────────────
