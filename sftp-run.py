@@ -157,9 +157,10 @@ def embed_exif_jpeg(data: bytes, dt: datetime, lat, lon, alt, desc=None, keyword
     """
     try:
         import piexif
+        import tempfile
 
         try:
-            exif_dict = piexif.load(data)
+            exif_dict = piexif.load(io.BytesIO(data))
         except Exception:
             exif_dict = {"0th": {}, "Exif": {}, "GPS": {}, "1st": {}, "thumbnail": None}
 
@@ -191,10 +192,23 @@ def embed_exif_jpeg(data: bytes, dt: datetime, lat, lon, alt, desc=None, keyword
             exif_dict["Exif"][piexif.ExifIFD.UserComment] = b'\x00' + people_bytes
 
         exif_bytes = piexif.dump(exif_dict)
-        # Use BytesIO to capture output from insert()
-        output = io.BytesIO()
-        piexif.insert(exif_bytes, data, output=output)
-        return output.getvalue()
+        
+        # piexif.insert() requires a file path. Use a temp file, read result, then delete.
+        with tempfile.NamedTemporaryFile(suffix='.jpg', delete=False) as tmp:
+            tmp_path = tmp.name
+            tmp.write(data)
+        
+        try:
+            piexif.insert(exif_bytes, tmp_path)
+            with open(tmp_path, 'rb') as f:
+                result = f.read()
+            return result
+        finally:
+            try:
+                os.remove(tmp_path)
+            except Exception:
+                pass
+                
     except Exception as e:
         bg_log(f"EXIF embed warning: {e}", "warn")
         return data
@@ -275,7 +289,7 @@ def embed_exif_tiff(data: bytes, dt: datetime, lat, lon, alt, desc=None, keyword
         # Build EXIF dict using piexif if available
         try:
             import piexif
-            exif_dict = piexif.load(data)
+            exif_dict = piexif.load(io.BytesIO(data))
         except Exception:
             exif_dict = {"0th": {}, "Exif": {}, "GPS": {}, "1st": {}, "thumbnail": None}
 
