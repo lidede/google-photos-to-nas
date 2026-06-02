@@ -20,16 +20,30 @@ PHOTO_EXTS  = {'.jpg','.jpeg','.png','.gif','.bmp','.webp','.heic','.heif','.tif
 VIDEO_EXTS  = {'.mp4','.mov','.avi','.mkv','.3gp','.m4v','.wmv','.mts'}
 ALL_EXTS    = PHOTO_EXTS | VIDEO_EXTS
 
+# Try importing optional dependencies
+try:
+    import ffmpeg
+    HAS_FFMPEG = True
+except ImportError:
+    HAS_FFMPEG = False
+
+try:
+    from PIL import Image
+    HAS_PILLOW = True
+except ImportError:
+    HAS_PILLOW = False
+
 transfer_status = {
     "running": False, "done": False,
     "uploaded": 0, "skipped": 0, "errors": 0, "total": 0,
+    "photos_processed": 0, "videos_processed": 0,
     "meta_fixed": 0,
     "phase": "", "pct": 0, "current_file": "",
     "log": [], "error": None
 }
 status_lock = threading.Lock()
 
-# ── Logging ───────────────────────────────────────────────────────────────────
+# ── Logging ───────────────────────────────────────────────────────────
 def bg_log(msg, level="info"):
     entry = {"time": datetime.now().strftime("%H:%M:%S"), "text": msg, "level": level}
     print(f"[{entry['time']}] {msg}")
@@ -42,7 +56,7 @@ def set_phase(phase, pct=None):
         if pct is not None:
             transfer_status["pct"] = pct
 
-# ── Metadata helpers ──────────────────────────────────────────────────────────
+# ── Metadata helpers ────────────────────────────────────────────────────────
 
 def find_meta_for(fname, meta_map):
     """
@@ -95,6 +109,50 @@ def parse_gps(meta):
     return None, None, None
 
 
+def parse_description(meta):
+    """Return description/caption from Google metadata, or None."""
+    return meta.get("description") or meta.get("caption")
+
+
+def parse_keywords(meta):
+    """Return keywords/album tags from Google metadata as list, or empty list."""
+    keywords = []
+    # Try to get album info
+    albums = meta.get("albumLabels", [])
+    if albums and isinstance(albums, list):
+        keywords.extend(albums)
+    # Try explicit keywords field
+    if meta.get("keywords"):
+        kw = meta.get("keywords")
+        if isinstance(kw, list):
+            keywords.extend(kw)
+        else:
+            keywords.append(str(kw))
+    return keywords
+
+
+def parse_orientation(meta):
+    """Return EXIF orientation (1-8) from Google metadata, or None."""
+    # Google may store orientation in different places
+    if meta.get("orientation"):
+        try:
+            return int(meta.get("orientation"))
+        except (ValueError, TypeError):
+            pass
+    return None
+
+
+def parse_people_tags(meta):
+    """Return face recognition/people tags from Google metadata as string, or None."""
+    people = meta.get("peopleNames") or meta.get("faceRegions")
+    if people:
+        if isinstance(people, list):
+            return ", ".join(str(p) for p in people)
+        else:
+            return str(people)
+    return None
+
+
 def dms_rational(deg):
     """Convert decimal degrees to EXIF rational (degrees, minutes, seconds)."""
     d = int(abs(deg))
@@ -105,9 +163,9 @@ def dms_rational(deg):
     return [(d, 1), (m, 1), (int(s_float * 1000), 1000)]
 
 
-def embed_exif_jpeg(data: bytes, dt: datetime, lat, lon, alt) -> bytes:
+def embed_exif_jpeg(data: bytes, dt: datetime, lat, lon, alt, desc=None, keywords=None, orientation=None, people=None) -> bytes:
     """
-    Embed DateTimeOriginal + GPS into a JPEG using piexif.
+    Embed DateTimeOriginal + GPS + description + keywords + orientation + people into a JPEG using piexif.
     Falls back to returning original data if anything fails.
     """
     try:
@@ -133,6 +191,20 @@ def embed_exif_jpeg(data: bytes, dt: datetime, lat, lon, alt) -> bytes:
                 exif_dict["GPS"][piexif.GPSIFD.GPSAltitudeRef] = b"\x00"
                 exif_dict["GPS"][piexif.GPSIFD.GPSAltitude]    = (int(abs(alt) * 100), 100)
 
+        if orientation and 1 <= orientation <= 8:
+            exif_dict["0th"][piexif.ImageIFD.Orientation] = orientation
+
+        if desc:
+            exif_dict["0th"][piexif.ImageIFD.ImageDescription] = desc[:1000].encode()
+
+        if keywords:
+            kw_str = ", ".join(keywords) if isinstance(keywords, list) else keywords
+            exif_dict["0th"][piexif.ImageIFD.ImageKeywords] = kw_str[:1000].encode()
+
+        if people:
+            # Store in user comment as fallback
+            exif_dict["Exif"][piexif.ExifIFD.UserComment] = people[:1000].encode()
+
         exif_bytes = piexif.dump(exif_dict)
         return piexif.insert(exif_bytes, data)
     except Exception as e:
@@ -140,22 +212,50 @@ def embed_exif_jpeg(data: bytes, dt: datetime, lat, lon, alt) -> bytes:
         return data
 
 
-def embed_exif_png(data: bytes, dt: datetime) -> bytes:
+def embed_exif_png(data: bytes, dt: datetime, desc=None, keywords=None, orientation=None, people=None) -> bytes:
     """
-    Embed creation time into PNG as a tEXt chunk (Creation Time).
+    Embed creation time into PNG as a tEXt chunk, plus description, keywords, orientation.
     PNG doesn't support EXIF dates natively the same way; tEXt is widely read.
     """
     try:
         if not dt:
             return data
-        # Find IEND chunk and insert tEXt before it
+        
+        chunks = []
         key = b"Creation Time"
         val = dt.strftime("%Y-%m-%dT%H:%M:%SZ").encode()
         chunk_data = key + b"\x00" + val
         crc = _png_crc(b"tEXt" + chunk_data)
-        chunk = struct.pack(">I", len(chunk_data)) + b"tEXt" + chunk_data + struct.pack(">I", crc)
+        chunks.append(struct.pack(">I", len(chunk_data)) + b"tEXt" + chunk_data + struct.pack(">I", crc))
+
+        if desc:
+            key = b"Description"
+            val = desc[:1000].encode()
+            chunk_data = key + b"\x00" + val
+            crc = _png_crc(b"tEXt" + chunk_data)
+            chunks.append(struct.pack(">I", len(chunk_data)) + b"tEXt" + chunk_data + struct.pack(">I", crc))
+
+        if keywords:
+            key = b"Keywords"
+            kw_str = ", ".join(keywords) if isinstance(keywords, list) else keywords
+            val = kw_str[:1000].encode()
+            chunk_data = key + b"\x00" + val
+            crc = _png_crc(b"tEXt" + chunk_data)
+            chunks.append(struct.pack(">I", len(chunk_data)) + b"tEXt" + chunk_data + struct.pack(">I", crc))
+
+        if orientation:
+            key = b"Orientation"
+            val = str(orientation).encode()
+            chunk_data = key + b"\x00" + val
+            crc = _png_crc(b"tEXt" + chunk_data)
+            chunks.append(struct.pack(">I", len(chunk_data)) + b"tEXt" + chunk_data + struct.pack(">I", crc))
+
         # Insert before IEND (last 12 bytes)
-        return data[:-12] + chunk + data[-12:]
+        result = data[:-12]
+        for chunk in chunks:
+            result += chunk
+        result += data[-12:]
+        return result
     except Exception:
         return data
 
@@ -165,34 +265,207 @@ def _png_crc(data: bytes) -> int:
     return zlib.crc32(data) & 0xFFFFFFFF
 
 
+def embed_exif_heic(data: bytes, dt: datetime, lat, lon, alt, desc=None, keywords=None, orientation=None, people=None) -> bytes:
+    """
+    Embed metadata into HEIC files using Pillow if available.
+    HEIC support is limited; this attempts to embed and returns original data if it fails.
+    """
+    if not HAS_PILLOW:
+        bg_log(f"Pillow not installed — HEIC metadata embedding skipped", "warn")
+        return data
+    
+    try:
+        img = Image.open(io.BytesIO(data))
+        exif_dict = {"0th": {}, "Exif": {}, "GPS": {}}
+
+        if dt:
+            dt_str = dt.strftime("%Y:%m:%d %H:%M:%S")
+            exif_dict["0th"][306] = dt_str  # DateTime
+            exif_dict["Exif"][36867] = dt_str  # DateTimeOriginal
+
+        if lat is not None and lon is not None:
+            exif_dict["GPS"][1] = b"N" if lat >= 0 else b"S"  # GPSLatitudeRef
+            exif_dict["GPS"][2] = dms_rational(lat)  # GPSLatitude
+            exif_dict["GPS"][3] = b"E" if lon >= 0 else b"W"  # GPSLongitudeRef
+            exif_dict["GPS"][4] = dms_rational(lon)  # GPSLongitude
+            if alt is not None:
+                exif_dict["GPS"][5] = b"\x00"  # GPSAltitudeRef
+                exif_dict["GPS"][6] = (int(abs(alt) * 100), 100)  # GPSAltitude
+
+        if orientation and 1 <= orientation <= 8:
+            exif_dict["0th"][274] = orientation  # Orientation
+
+        if desc:
+            exif_dict["0th"][270] = desc[:1000]  # ImageDescription
+
+        if keywords:
+            kw_str = ", ".join(keywords) if isinstance(keywords, list) else keywords
+            exif_dict["0th"][33550] = kw_str[:1000]  # Keywords (if supported)
+
+        # Convert back to bytes (Pillow HEIC write support is limited, so we attempt lossless)
+        output = io.BytesIO()
+        img.save(output, format='HEIC', quality=95)
+        return output.getvalue()
+    except Exception as e:
+        bg_log(f"HEIC metadata embedding warning: {e}", "warn")
+        return data
+
+
+def embed_exif_tiff(data: bytes, dt: datetime, lat, lon, alt, desc=None, keywords=None, orientation=None, people=None) -> bytes:
+    """
+    Embed metadata into TIFF files using Pillow if available.
+    """
+    if not HAS_PILLOW:
+        bg_log(f"Pillow not installed — TIFF metadata embedding skipped", "warn")
+        return data
+    
+    try:
+        img = Image.open(io.BytesIO(data))
+        exif_dict = {"0th": {}, "Exif": {}, "GPS": {}}
+
+        if dt:
+            dt_str = dt.strftime("%Y:%m:%d %H:%M:%S")
+            exif_dict["0th"][306] = dt_str  # DateTime
+            exif_dict["Exif"][36867] = dt_str  # DateTimeOriginal
+
+        if lat is not None and lon is not None:
+            exif_dict["GPS"][1] = b"N" if lat >= 0 else b"S"
+            exif_dict["GPS"][2] = dms_rational(lat)
+            exif_dict["GPS"][3] = b"E" if lon >= 0 else b"W"
+            exif_dict["GPS"][4] = dms_rational(lon)
+            if alt is not None:
+                exif_dict["GPS"][5] = b"\x00"
+                exif_dict["GPS"][6] = (int(abs(alt) * 100), 100)
+
+        if orientation and 1 <= orientation <= 8:
+            exif_dict["0th"][274] = orientation
+
+        if desc:
+            exif_dict["0th"][270] = desc[:1000]
+
+        if keywords:
+            kw_str = ", ".join(keywords) if isinstance(keywords, list) else keywords
+            exif_dict["0th"][33550] = kw_str[:1000]
+
+        output = io.BytesIO()
+        img.save(output, format='TIFF')
+        return output.getvalue()
+    except Exception as e:
+        bg_log(f"TIFF metadata embedding warning: {e}", "warn")
+        return data
+
+
+def embed_metadata_video(fname: str, data: bytes, meta: dict) -> tuple:
+    """
+    Embed metadata into video files using ffmpeg.
+    Returns (modified_data, was_modified).
+    Losslessly copies streams while embedding metadata.
+    """
+    if not HAS_FFMPEG:
+        bg_log(f"  ↳ {fname}: ffmpeg-python not installed — video metadata skipped", "warn")
+        return data, False
+
+    try:
+        dt, _, _ = parse_timestamp(meta)
+        lat, lon, alt = parse_gps(meta)
+
+        if not (dt or lat):
+            return data, False  # No metadata to add
+
+        # Create temp files for ffmpeg processing
+        import tempfile
+        with tempfile.NamedTemporaryFile(suffix=os.path.splitext(fname)[1], delete=False) as tmp_in:
+            tmp_in_path = tmp_in.name
+            tmp_in.write(data)
+
+        with tempfile.NamedTemporaryFile(suffix=os.path.splitext(fname)[1], delete=False) as tmp_out:
+            tmp_out_path = tmp_out.name
+
+        try:
+            # Build ffmpeg command with metadata
+            stream = ffmpeg.input(tmp_in_path)
+            output_kwargs = {'c:v': 'copy', 'c:a': 'copy'}  # Lossless copy
+
+            if dt:
+                creation_time = dt.strftime("%Y-%m-%dT%H:%M:%S")
+                output_kwargs['metadata:g'] = f"creation_time={creation_time}"
+
+            if lat is not None and lon is not None:
+                # Note: GPS in video is format-specific; not all containers support it
+                gps_str = f"lat={lat:.6f},lon={lon:.6f}"
+                if alt is not None:
+                    gps_str += f",alt={alt:.2f}"
+                output_kwargs['metadata:g'] = gps_str
+
+            stream = ffmpeg.output(stream, tmp_out_path, **output_kwargs)
+            ffmpeg.run(stream, overwrite_output=True, quiet=True)
+
+            # Read modified video
+            with open(tmp_out_path, 'rb') as f:
+                new_data = f.read()
+
+            return new_data, True
+
+        except Exception as e:
+            bg_log(f"  ↳ {fname}: video metadata embedding failed: {e}", "warn")
+            return data, False
+        finally:
+            # Clean up temp files
+            try:
+                os.remove(tmp_in_path)
+                os.remove(tmp_out_path)
+            except Exception:
+                pass
+
+    except Exception as e:
+        bg_log(f"  ↳ {fname}: video processing error: {e}", "warn")
+        return data, False
+
+
 def apply_metadata(fname: str, data: bytes, meta: dict) -> tuple:
     """
-    Apply date + GPS metadata to the file bytes.
+    Apply date + GPS + description + keywords + orientation + people metadata to the file bytes.
     Returns (modified_data, was_modified).
     """
     ext = os.path.splitext(fname)[1].lower()
-    if ext not in PHOTO_EXTS:
-        return data, False  # Videos — skip EXIF (complex container formats)
+    if ext not in PHOTO_EXTS and ext not in VIDEO_EXTS:
+        return data, False
 
     dt, _, _ = parse_timestamp(meta)
     lat, lon, alt = parse_gps(meta)
+    desc = parse_description(meta)
+    keywords = parse_keywords(meta)
+    orientation = parse_orientation(meta)
+    people = parse_people_tags(meta)
 
+    # Videos use special handling
+    if ext in VIDEO_EXTS:
+        return embed_metadata_video(fname, data, meta)
+
+    # Photos with enhanced metadata
     if ext in ('.jpg', '.jpeg'):
-        new_data = embed_exif_jpeg(data, dt, lat, lon, alt)
+        new_data = embed_exif_jpeg(data, dt, lat, lon, alt, desc, keywords, orientation, people)
         return new_data, new_data != data
 
     if ext == '.png':
-        new_data = embed_exif_png(data, dt)
+        new_data = embed_exif_png(data, dt, desc, keywords, orientation, people)
         return new_data, new_data != data
 
-    # HEIC/TIFF/etc. — can't safely rewrite without heavy libraries
-    # At least log that metadata was found
-    if dt or lat:
-        bg_log(f"  ↳ {fname}: metadata found but format {ext} requires manual EXIF tool", "warn")
+    if ext in ('.heic', '.heif'):
+        new_data = embed_exif_heic(data, dt, lat, lon, alt, desc, keywords, orientation, people)
+        return new_data, new_data != data
+
+    if ext in ('.tiff', '.tif'):
+        new_data = embed_exif_tiff(data, dt, lat, lon, alt, desc, keywords, orientation, people)
+        return new_data, new_data != data
+
+    # Other formats — at least log that metadata was found
+    if dt or lat or desc:
+        bg_log(f"  ↳ {fname}: metadata found but format {ext} not yet supported", "warn")
     return data, False
 
 
-# ── SFTP helpers ──────────────────────────────────────────────────────────────
+# ── SFTP helpers ─────────────────────────────────────────────────────────
 
 def sftp_makedirs(sftp, remote_path):
     parts = [p for p in remote_path.replace("\\", "/").split("/") if p]
@@ -255,13 +528,14 @@ def subfolder(year, month, mode):
     return ""
 
 
-# ── Main transfer job ─────────────────────────────────────────────────────────
+# ── Main transfer job ────────────────────────────────────────────────────────
 
 def run_transfer(config):
     with status_lock:
         transfer_status.update({
             "running": True, "done": False, "uploaded": 0, "skipped": 0,
-            "errors": 0, "total": 0, "meta_fixed": 0,
+            "errors": 0, "total": 0, "photos_processed": 0, "videos_processed": 0,
+            "meta_fixed": 0,
             "phase": "", "pct": 0, "current_file": "", "log": [], "error": None
         })
 
@@ -348,6 +622,9 @@ def run_transfer(config):
 
         for i, (zp, info) in enumerate(all_entries):
             fname = os.path.basename(info.filename)
+            ext = os.path.splitext(fname)[1].lower()
+            is_video = ext in VIDEO_EXTS
+            
             with status_lock:
                 transfer_status["current_file"] = fname
                 transfer_status["pct"] = 22 + int(i / max(total, 1) * 75)
@@ -372,10 +649,17 @@ def run_transfer(config):
                 if meta and do_meta:
                     data, was_fixed = apply_metadata(fname, data, meta)
                     if was_fixed:
-                        with status_lock: transfer_status["meta_fixed"] += 1
+                        with status_lock: 
+                            transfer_status["meta_fixed"] += 1
+                            if is_video:
+                                transfer_status["videos_processed"] += 1
+                            else:
+                                transfer_status["photos_processed"] += 1
+                        
                         lat, lon, _ = parse_gps(meta)
                         gps_note = f" GPS({lat:.4f},{lon:.4f})" if lat else ""
-                        bg_log(f"  ↳ EXIF restored: {dt.strftime('%Y-%m-%d %H:%M') if dt else '?'}{gps_note} → {fname}", "ok")
+                        file_type = "Video" if is_video else "Photo"
+                        bg_log(f"  ↳ {file_type} metadata restored: {dt.strftime('%Y-%m-%d %H:%M') if dt else '?'}{gps_note} → {fname}", "ok")
                 elif meta is None and do_meta:
                     bg_log(f"  ↳ No sidecar found for: {fname}", "warn")
 
@@ -425,7 +709,13 @@ def run_transfer(config):
 
         with status_lock:
             mf = transfer_status["meta_fixed"]
-        bg_log(f"Transfer complete. EXIF metadata restored on {mf} file(s).", "ok")
+            vp = transfer_status["videos_processed"]
+            pp = transfer_status["photos_processed"]
+        
+        if vp > 0 or pp > 0:
+            bg_log(f"Transfer complete. Metadata restored on {mf} file(s): {pp} photo(s), {vp} video(s).", "ok")
+        else:
+            bg_log(f"Transfer complete. EXIF metadata restored on {mf} file(s).", "ok")
         set_phase("Complete", 100)
 
     except paramiko.AuthenticationException:
@@ -442,7 +732,7 @@ def run_transfer(config):
         transfer_status["done"]    = True
 
 
-# ── HTTP handler ──────────────────────────────────────────────────────────────
+# ── HTTP handler ─────────────────────────────────────────────────────────
 
 class Handler(http.server.SimpleHTTPRequestHandler):
     def log_message(self, fmt, *args): pass
@@ -498,7 +788,8 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             with status_lock:
                 transfer_status.update({
                     "running": False, "done": False, "uploaded": 0, "skipped": 0,
-                    "errors": 0, "total": 0, "meta_fixed": 0,
+                    "errors": 0, "total": 0, "photos_processed": 0, "videos_processed": 0,
+                    "meta_fixed": 0,
                     "phase": "", "pct": 0, "current_file": "", "log": [], "error": None
                 })
             self._json({"ok": True})
@@ -573,7 +864,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         self.wfile.write(json.dumps(data).encode())
 
 
-# ── Entry point ───────────────────────────────────────────────────────────────
+# ── Entry point ──────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
     socketserver.TCPServer.allow_reuse_address = True
@@ -583,6 +874,15 @@ if __name__ == "__main__":
     print(f"  │   Open:  http://localhost:{PORT}             │")
     print("  │   Stop:  Ctrl+C                          │")
     print("  └──────────────────────────────────────────┘\n")
+    
+    # Log optional dependency availability
+    if not HAS_FFMPEG:
+        print("  ⚠ ffmpeg-python not installed — video metadata embedding disabled")
+        print("    Install with: pip install ffmpeg-python")
+    if not HAS_PILLOW:
+        print("  ⚠ Pillow not installed — HEIC/TIFF metadata embedding disabled")
+        print("    Install with: pip install pillow")
+    
     threading.Timer(1.2, lambda: webbrowser.open(f"http://localhost:{PORT}")).start()
     with socketserver.TCPServer(("127.0.0.1", PORT), Handler) as httpd:
         httpd.serve_forever()
