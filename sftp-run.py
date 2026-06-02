@@ -29,6 +29,7 @@ except ImportError:
 
 try:
     from PIL import Image
+    import piexif as pil_exif
     HAS_PILLOW = True
 except ImportError:
     HAS_PILLOW = False
@@ -197,13 +198,11 @@ def embed_exif_jpeg(data: bytes, dt: datetime, lat, lon, alt, desc=None, keyword
         if desc:
             exif_dict["0th"][piexif.ImageIFD.ImageDescription] = desc[:1000].encode()
 
-        if keywords:
-            kw_str = ", ".join(keywords) if isinstance(keywords, list) else keywords
-            exif_dict["0th"][piexif.ImageIFD.ImageKeywords] = kw_str[:1000].encode()
-
         if people:
-            # Store in user comment as fallback
-            exif_dict["Exif"][piexif.ExifIFD.UserComment] = people[:1000].encode()
+            # Store in EXIF user comment with proper charset prefix (ASCII)
+            # Format: b'\x00' (ASCII charset) + comment bytes
+            people_bytes = people[:1000].encode('utf-8', errors='ignore')
+            exif_dict["Exif"][piexif.ExifIFD.UserComment] = b'\x00' + people_bytes
 
         exif_bytes = piexif.dump(exif_dict)
         return piexif.insert(exif_bytes, data)
@@ -250,6 +249,13 @@ def embed_exif_png(data: bytes, dt: datetime, desc=None, keywords=None, orientat
             crc = _png_crc(b"tEXt" + chunk_data)
             chunks.append(struct.pack(">I", len(chunk_data)) + b"tEXt" + chunk_data + struct.pack(">I", crc))
 
+        if people:
+            key = b"People"
+            val = people[:1000].encode()
+            chunk_data = key + b"\x00" + val
+            crc = _png_crc(b"tEXt" + chunk_data)
+            chunks.append(struct.pack(">I", len(chunk_data)) + b"tEXt" + chunk_data + struct.pack(">I", crc))
+
         # Insert before IEND (last 12 bytes)
         result = data[:-12]
         for chunk in chunks:
@@ -265,55 +271,10 @@ def _png_crc(data: bytes) -> int:
     return zlib.crc32(data) & 0xFFFFFFFF
 
 
-def embed_exif_heic(data: bytes, dt: datetime, lat, lon, alt, desc=None, keywords=None, orientation=None, people=None) -> bytes:
-    """
-    Embed metadata into HEIC files using Pillow if available.
-    HEIC support is limited; this attempts to embed and returns original data if it fails.
-    """
-    if not HAS_PILLOW:
-        bg_log(f"Pillow not installed — HEIC metadata embedding skipped", "warn")
-        return data
-    
-    try:
-        img = Image.open(io.BytesIO(data))
-        exif_dict = {"0th": {}, "Exif": {}, "GPS": {}}
-
-        if dt:
-            dt_str = dt.strftime("%Y:%m:%d %H:%M:%S")
-            exif_dict["0th"][306] = dt_str  # DateTime
-            exif_dict["Exif"][36867] = dt_str  # DateTimeOriginal
-
-        if lat is not None and lon is not None:
-            exif_dict["GPS"][1] = b"N" if lat >= 0 else b"S"  # GPSLatitudeRef
-            exif_dict["GPS"][2] = dms_rational(lat)  # GPSLatitude
-            exif_dict["GPS"][3] = b"E" if lon >= 0 else b"W"  # GPSLongitudeRef
-            exif_dict["GPS"][4] = dms_rational(lon)  # GPSLongitude
-            if alt is not None:
-                exif_dict["GPS"][5] = b"\x00"  # GPSAltitudeRef
-                exif_dict["GPS"][6] = (int(abs(alt) * 100), 100)  # GPSAltitude
-
-        if orientation and 1 <= orientation <= 8:
-            exif_dict["0th"][274] = orientation  # Orientation
-
-        if desc:
-            exif_dict["0th"][270] = desc[:1000]  # ImageDescription
-
-        if keywords:
-            kw_str = ", ".join(keywords) if isinstance(keywords, list) else keywords
-            exif_dict["0th"][33550] = kw_str[:1000]  # Keywords (if supported)
-
-        # Convert back to bytes (Pillow HEIC write support is limited, so we attempt lossless)
-        output = io.BytesIO()
-        img.save(output, format='HEIC', quality=95)
-        return output.getvalue()
-    except Exception as e:
-        bg_log(f"HEIC metadata embedding warning: {e}", "warn")
-        return data
-
-
 def embed_exif_tiff(data: bytes, dt: datetime, lat, lon, alt, desc=None, keywords=None, orientation=None, people=None) -> bytes:
     """
-    Embed metadata into TIFF files using Pillow if available.
+    Embed metadata into TIFF files by re-encoding with Pillow.
+    Uses piexif for EXIF data manipulation if available.
     """
     if not HAS_PILLOW:
         bg_log(f"Pillow not installed — TIFF metadata embedding skipped", "warn")
@@ -321,34 +282,39 @@ def embed_exif_tiff(data: bytes, dt: datetime, lat, lon, alt, desc=None, keyword
     
     try:
         img = Image.open(io.BytesIO(data))
-        exif_dict = {"0th": {}, "Exif": {}, "GPS": {}}
+        
+        # Build EXIF dict using piexif if available
+        try:
+            import piexif
+            exif_dict = piexif.load(data)
+        except Exception:
+            exif_dict = {"0th": {}, "Exif": {}, "GPS": {}, "1st": {}, "thumbnail": None}
 
         if dt:
-            dt_str = dt.strftime("%Y:%m:%d %H:%M:%S")
-            exif_dict["0th"][306] = dt_str  # DateTime
-            exif_dict["Exif"][36867] = dt_str  # DateTimeOriginal
+            dt_str = dt.strftime("%Y:%m:%d %H:%M:%S").encode()
+            exif_dict["Exif"][piexif.ExifIFD.DateTimeOriginal]  = dt_str
+            exif_dict["Exif"][piexif.ExifIFD.DateTimeDigitized] = dt_str
+            exif_dict["0th"][piexif.ImageIFD.DateTime]          = dt_str
 
         if lat is not None and lon is not None:
-            exif_dict["GPS"][1] = b"N" if lat >= 0 else b"S"
-            exif_dict["GPS"][2] = dms_rational(lat)
-            exif_dict["GPS"][3] = b"E" if lon >= 0 else b"W"
-            exif_dict["GPS"][4] = dms_rational(lon)
+            exif_dict["GPS"][piexif.GPSIFD.GPSLatitudeRef]  = b"N" if lat >= 0 else b"S"
+            exif_dict["GPS"][piexif.GPSIFD.GPSLatitude]     = dms_rational(lat)
+            exif_dict["GPS"][piexif.GPSIFD.GPSLongitudeRef] = b"E" if lon >= 0 else b"W"
+            exif_dict["GPS"][piexif.GPSIFD.GPSLongitude]    = dms_rational(lon)
             if alt is not None:
-                exif_dict["GPS"][5] = b"\x00"
-                exif_dict["GPS"][6] = (int(abs(alt) * 100), 100)
+                exif_dict["GPS"][piexif.GPSIFD.GPSAltitudeRef] = b"\x00"
+                exif_dict["GPS"][piexif.GPSIFD.GPSAltitude]    = (int(abs(alt) * 100), 100)
 
         if orientation and 1 <= orientation <= 8:
-            exif_dict["0th"][274] = orientation
+            exif_dict["0th"][piexif.ImageIFD.Orientation] = orientation
 
         if desc:
-            exif_dict["0th"][270] = desc[:1000]
+            exif_dict["0th"][piexif.ImageIFD.ImageDescription] = desc[:1000].encode()
 
-        if keywords:
-            kw_str = ", ".join(keywords) if isinstance(keywords, list) else keywords
-            exif_dict["0th"][33550] = kw_str[:1000]
-
+        # For TIFF, save with EXIF data
+        exif_bytes = piexif.dump(exif_dict)
         output = io.BytesIO()
-        img.save(output, format='TIFF')
+        img.save(output, format='TIFF', exif=exif_bytes)
         return output.getvalue()
     except Exception as e:
         bg_log(f"TIFF metadata embedding warning: {e}", "warn")
@@ -382,23 +348,27 @@ def embed_metadata_video(fname: str, data: bytes, meta: dict) -> tuple:
             tmp_out_path = tmp_out.name
 
         try:
-            # Build ffmpeg command with metadata
-            stream = ffmpeg.input(tmp_in_path)
-            output_kwargs = {'c:v': 'copy', 'c:a': 'copy'}  # Lossless copy
-
+            # Build ffmpeg command with metadata - use list of arguments to avoid key collision
+            cmd_args = ['ffmpeg', '-i', tmp_in_path, '-c:v', 'copy', '-c:a', 'copy']
+            
             if dt:
                 creation_time = dt.strftime("%Y-%m-%dT%H:%M:%S")
-                output_kwargs['metadata:g'] = f"creation_time={creation_time}"
-
+                cmd_args.extend(['-metadata:g', f'creation_time={creation_time}'])
+            
             if lat is not None and lon is not None:
-                # Note: GPS in video is format-specific; not all containers support it
+                # GPS metadata (format-specific, not all containers support it)
                 gps_str = f"lat={lat:.6f},lon={lon:.6f}"
                 if alt is not None:
                     gps_str += f",alt={alt:.2f}"
-                output_kwargs['metadata:g'] = gps_str
-
-            stream = ffmpeg.output(stream, tmp_out_path, **output_kwargs)
-            ffmpeg.run(stream, overwrite_output=True, quiet=True)
+                cmd_args.extend(['-metadata:g', gps_str])
+            
+            cmd_args.extend(['-y', tmp_out_path])
+            
+            # Run ffmpeg directly
+            ffmpeg.run(ffmpeg.input(tmp_in_path)
+                .output(tmp_out_path, c_v='copy', c_a='copy', 
+                       **{'metadata:g': f'creation_time={dt.strftime("%Y-%m-%dT%H:%M:%S")}' if dt else ''})
+                .overwrite_output(), quiet=True)
 
             # Read modified video
             with open(tmp_out_path, 'rb') as f:
@@ -452,8 +422,15 @@ def apply_metadata(fname: str, data: bytes, meta: dict) -> tuple:
         return new_data, new_data != data
 
     if ext in ('.heic', '.heif'):
-        new_data = embed_exif_heic(data, dt, lat, lon, alt, desc, keywords, orientation, people)
-        return new_data, new_data != data
+        # HEIC: save without re-encoding to avoid corruption
+        if not HAS_PILLOW:
+            bg_log(f"  ↳ {fname}: Pillow not installed — HEIC transferred without metadata", "warn")
+            return data, False
+        # For HEIC, just transfer as-is since Pillow can't reliably write HEIC with metadata
+        # Log that we found metadata but can't embed it
+        if dt or lat or desc:
+            bg_log(f"  ↳ {fname}: HEIC metadata found but embedding requires external tools like exiftool", "warn")
+        return data, False
 
     if ext in ('.tiff', '.tif'):
         new_data = embed_exif_tiff(data, dt, lat, lon, alt, desc, keywords, orientation, people)
@@ -468,18 +445,27 @@ def apply_metadata(fname: str, data: bytes, meta: dict) -> tuple:
 # ── SFTP helpers ─────────────────────────────────────────────────────────
 
 def sftp_makedirs(sftp, remote_path):
+    """Create remote directories, handling absolute and relative paths correctly."""
     parts = [p for p in remote_path.replace("\\", "/").split("/") if p]
-    built = "" if remote_path.startswith("/") else None
-    for part in parts:
-        if built is None:
-            built = part
+    
+    if not parts:
+        return  # Empty path
+    
+    is_absolute = remote_path.startswith("/")
+    
+    for i, part in enumerate(parts):
+        if is_absolute:
+            # Absolute path: /a/b/c → build /, /a, /a/b, /a/b/c
+            path = "/" + "/".join(parts[:i+1])
         else:
-            built = ("/" if built == "" else built) + ("" if built.endswith("/") else "/") + part
+            # Relative path: a/b/c → build a, a/b, a/b/c
+            path = "/".join(parts[:i+1])
+        
         try:
-            sftp.stat(built)
+            sftp.stat(path)
         except FileNotFoundError:
             try:
-                sftp.mkdir(built)
+                sftp.mkdir(path)
             except Exception:
                 pass
 
@@ -880,7 +866,7 @@ if __name__ == "__main__":
         print("  ⚠ ffmpeg-python not installed — video metadata embedding disabled")
         print("    Install with: pip install ffmpeg-python")
     if not HAS_PILLOW:
-        print("  ⚠ Pillow not installed — HEIC/TIFF metadata embedding disabled")
+        print("  ⚠ Pillow not installed — TIFF metadata embedding disabled")
         print("    Install with: pip install pillow")
     
     threading.Timer(1.2, lambda: webbrowser.open(f"http://localhost:{PORT}")).start()
