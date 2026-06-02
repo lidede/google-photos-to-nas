@@ -191,7 +191,10 @@ def embed_exif_jpeg(data: bytes, dt: datetime, lat, lon, alt, desc=None, keyword
             exif_dict["Exif"][piexif.ExifIFD.UserComment] = b'\x00' + people_bytes
 
         exif_bytes = piexif.dump(exif_dict)
-        return piexif.insert(exif_bytes, data)
+        # Use BytesIO to capture output from insert()
+        output = io.BytesIO()
+        piexif.insert(exif_bytes, data, output=output)
+        return output.getvalue()
     except Exception as e:
         bg_log(f"EXIF embed warning: {e}", "warn")
         return data
