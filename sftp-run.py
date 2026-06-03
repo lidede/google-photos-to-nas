@@ -62,13 +62,14 @@ def set_phase(phase, pct=None):
 def extract_media_filename_from_json(json_basename):
     """
     Extract the media filename from a JSON sidecar filename.
-    Handles both full and truncated names.
+    Handles both full and truncated names by finding the media extension.
     
     Examples:
     - "image.jpg.json" → "image.jpg"
     - "image.jpg.supplemental-metadata.json" → "image.jpg"
     - "image.jpg.supplemental-met.json" (truncated) → "image.jpg"
-    - "image(1).jpg.json" → "image(1).jpg"
+    - "image.jpg.supplem.json" → "image.jpg"
+    - "image.jpg.s.json" → "image.jpg"
     
     Returns the media filename, or None if it can't be determined.
     """
@@ -96,7 +97,12 @@ def extract_media_filename_from_json(json_basename):
 def find_matching_json(json_basename, all_media_files):
     """
     Find which media file this JSON sidecar belongs to.
-    Handles exact matches and fuzzy matching for truncated filenames.
+    
+    Strategy:
+    1. Extract expected media filename from JSON name
+    2. Try exact match
+    3. Try case-insensitive match
+    4. Try prefix match (for edge cases with weird truncation)
     
     Returns the media filename that this JSON describes, or None.
     """
@@ -105,18 +111,21 @@ def find_matching_json(json_basename, all_media_files):
     if not media_filename:
         return None
     
+    media_filename_lower = media_filename.lower()
+    
     # Try exact match first
     if media_filename in all_media_files:
         return media_filename
     
-    # If no exact match, try fuzzy matching for truncated names
-    # The media_filename extraction should work for most cases,
-    # but in case of edge cases, try prefix matching
+    # Try case-insensitive match
     for media_file in all_media_files:
-        if media_file.startswith(media_filename[:min(len(media_filename), 30)]):
-            # Additional validation: media file should also start with media_filename
-            if media_file.lower().startswith(media_filename.lower()):
-                return media_file
+        if media_file.lower() == media_filename_lower:
+            return media_file
+    
+    # Try prefix match: media file starts with the extracted name
+    for media_file in all_media_files:
+        if media_file.lower().startswith(media_filename_lower):
+            return media_file
     
     return None
 
