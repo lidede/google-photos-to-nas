@@ -10,7 +10,6 @@ import hashlib
 import webbrowser
 import struct
 import paramiko
-import difflib
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -60,23 +59,28 @@ def set_phase(phase, pct=None):
 
 # ── Metadata helpers ────────────────────────────────────────────────────────
 
-def find_matching_media(json_basename, all_media_files):
+def find_matching_media(json_basename, media_basename_map):
     """
-    Find the best matching media file for a JSON sidecar using string similarity.
+    Find the best matching media file for a JSON sidecar using a fast lookup strategy.
     
     Strategy:
-    1. Remove .json from JSON filename
-    2. Find all media files that start with the JSON name (exact prefix match)
-    3. If multiple matches, use SequenceMatcher to find the closest one
-    4. If no exact prefix match, find the closest match by similarity ratio
+    1. Remove .json from JSON filename to get the base name
+    2. Try direct lookup in the media_basename_map (instant O(1))
+    3. If no exact match, try removing common suffixes (.supplemental-metadata, .supplemental-met, etc.)
+    4. Return the matching media file, or None
     
     Examples:
-    - "image.jpg.json" → matches "image.jpg"
-    - "image.jpg.supplemental-metadata.json" → matches "image.jpg"
-    - "image.jpg.supplemental-met.json" (truncated) → matches "image.jpg"
-    - "image.jpg.s.json" (heavily truncated) → matches "image.jpg"
+    - "image.jpg.json" → "image.jpg" (direct match)
+    - "image.jpg.supplemental-metadata.json" → "image.jpg" (suffix removal)
+    - "image.jpg.supplemental-met.json" → "image.jpg" (truncated suffix removal)
+    - "image.jpg.s.json" → "image.jpg" (aggressive truncation)
     
-    Returns the media filename that this JSON describes, or None.
+    Args:
+        json_basename: The JSON filename (e.g., "image.jpg.json")
+        media_basename_map: Dict mapping media basenames to themselves for O(1) lookup
+        
+    Returns:
+        The matching media basename, or None if no match found.
     """
     if not json_basename.endswith(".json"):
         return None
@@ -84,37 +88,38 @@ def find_matching_media(json_basename, all_media_files):
     # Remove .json extension
     json_name_without_ext = json_basename[:-5]
     
-    if not all_media_files:
+    if not media_basename_map:
         return None
     
-    best_match = None
-    best_ratio = 0
+    # Strategy 1: Try direct lookup (most common case)
+    # This handles "image.jpg.json" → "image.jpg"
+    if json_name_without_ext in media_basename_map:
+        return json_name_without_ext
     
-    for media_file in all_media_files:
-        # Remove media extension to compare base names
-        media_base = os.path.splitext(media_file)[0]
-        
-        # Strategy 1: Check if JSON name starts with media filename (most common case)
-        # E.g., "image.jpg.supplemental-metadata" starts with "image.jpg"
-        if json_name_without_ext.startswith(media_base):
-            return media_file
-        
-        # Strategy 2: Check if media filename starts with JSON base (for truncated cases)
-        # E.g., "image.jpg" starts with "image.jpg.s"
-        if media_base.startswith(json_name_without_ext):
-            return media_file
-        
-        # Strategy 3: Use sequence matching for fuzzy matching
-        # Calculate similarity ratio between JSON name and media file name
-        ratio = difflib.SequenceMatcher(None, json_name_without_ext.lower(), media_base.lower()).ratio()
-        
-        if ratio > best_ratio:
-            best_ratio = ratio
-            best_match = media_file
+    # Strategy 2: Remove known suffixes and try again
+    # This handles "image.jpg.supplemental-metadata" → "image.jpg"
+    candidates_to_try = []
     
-    # Only return a match if similarity is high enough (80%+)
-    if best_ratio > 0.8:
-        return best_match
+    # Try removing common supplemental-metadata suffixes
+    suffixes_to_try = [
+        '.supplemental-metadata',
+        '.supplemental-metada',  # truncated
+        '.supplemental-met',     # truncated
+        '.supplemental-',        # truncated
+        '.supplem',              # truncated
+        '.s',                    # heavily truncated
+    ]
+    
+    for suffix in suffixes_to_try:
+        if json_name_without_ext.endswith(suffix):
+            candidate = json_name_without_ext[:-len(suffix)]
+            if candidate and candidate not in candidates_to_try:
+                candidates_to_try.append(candidate)
+    
+    # Try each candidate
+    for candidate in candidates_to_try:
+        if candidate in media_basename_map:
+            return candidate
     
     return None
 
@@ -607,20 +612,20 @@ def run_transfer(config):
 
         all_entries = []   # list of (zip_path, ZipInfo)
         meta_map    = {}   # key: media basename, value: merged metadata dict
-        all_media_files = set()  # Track all media filenames for matching
+        media_basename_map = {}  # key: media basename, value: media basename (for O(1) lookup)
 
         for zp in zip_paths:
             zname = os.path.basename(zp)
             bg_log(f"Opening {zname}…")
             try:
                 with zipfile.ZipFile(zp, 'r') as z:
-                    # First pass: collect all media filenames
+                    # First pass: collect all media filenames into a dict for O(1) lookup
                     for info in z.infolist():
                         name = info.filename
                         ext  = os.path.splitext(name)[1].lower()
                         if ext in ALL_EXTS:
                             media_basename = os.path.basename(name)
-                            all_media_files.add(media_basename)
+                            media_basename_map[media_basename] = media_basename
                     
                     # Second pass: process all files
                     for info in z.infolist():
@@ -640,8 +645,8 @@ def run_transfer(config):
                                 if isinstance(meta, dict) and len(meta) > 0:
                                     json_basename = os.path.basename(name)
                                     
-                                    # Use similarity matching to find the media file this JSON belongs to
-                                    matched_media = find_matching_media(json_basename, all_media_files)
+                                    # Use fast lookup to find the media file this JSON belongs to
+                                    matched_media = find_matching_media(json_basename, media_basename_map)
                                     
                                     if matched_media:
                                         # Merge metadata: if we have multiple JSON files for same media, merge them
@@ -739,7 +744,7 @@ def run_transfer(config):
                     sftp_makedirs(sftp, dest_dir)
                     created_dirs.add(dest_dir)
 
-                # ── Skip existing ─────���───────────────────────────────────────
+                # ── Skip existing ─────────────────────────────────────────────
                 if skip_ex:
                     try:
                         sftp.stat(dest_path)
