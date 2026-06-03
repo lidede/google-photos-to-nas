@@ -59,6 +59,68 @@ def set_phase(phase, pct=None):
 
 # ── Metadata helpers ────────────────────────────────────────────────────────
 
+def extract_media_filename_from_json(json_basename):
+    """
+    Extract the media filename from a JSON sidecar filename.
+    Handles both full and truncated names.
+    
+    Examples:
+    - "image.jpg.json" → "image.jpg"
+    - "image.jpg.supplemental-metadata.json" → "image.jpg"
+    - "image.jpg.supplemental-met.json" (truncated) → "image.jpg"
+    - "image(1).jpg.json" → "image(1).jpg"
+    
+    Returns the media filename, or None if it can't be determined.
+    """
+    if not json_basename.endswith(".json"):
+        return None
+    
+    # Remove .json extension
+    without_json = json_basename[:-5]
+    
+    # Try to find where the media extension is
+    # Look for known media extensions in the filename
+    media_ext_pattern = r'\.(jpg|jpeg|png|gif|bmp|webp|heic|heif|tiff|tif|mp4|mov|avi|mkv|3gp|m4v|wmv|mts)(?:\.|$)'
+    match = re.search(media_ext_pattern, without_json, re.IGNORECASE)
+    
+    if not match:
+        return None
+    
+    # Get everything up to and including the media extension
+    end_pos = match.end(1) + 1  # +1 to include the dot before extension
+    media_filename = without_json[:end_pos]
+    
+    return media_filename
+
+
+def find_matching_json(json_basename, all_media_files):
+    """
+    Find which media file this JSON sidecar belongs to.
+    Handles exact matches and fuzzy matching for truncated filenames.
+    
+    Returns the media filename that this JSON describes, or None.
+    """
+    media_filename = extract_media_filename_from_json(json_basename)
+    
+    if not media_filename:
+        return None
+    
+    # Try exact match first
+    if media_filename in all_media_files:
+        return media_filename
+    
+    # If no exact match, try fuzzy matching for truncated names
+    # The media_filename extraction should work for most cases,
+    # but in case of edge cases, try prefix matching
+    for media_file in all_media_files:
+        if media_file.startswith(media_filename[:min(len(media_filename), 30)]):
+            # Additional validation: media file should also start with media_filename
+            if media_file.lower().startswith(media_filename.lower()):
+                return media_file
+    
+    return None
+
+
 def find_meta_for(fname, meta_map):
     """
     Direct lookup: try to find metadata for a file by matching its basename
@@ -547,12 +609,22 @@ def run_transfer(config):
 
         all_entries = []   # list of (zip_path, ZipInfo)
         meta_map    = {}   # key: media basename, value: merged metadata dict
+        all_media_files = set()  # Track all media filenames for fuzzy matching
 
         for zp in zip_paths:
             zname = os.path.basename(zp)
             bg_log(f"Opening {zname}…")
             try:
                 with zipfile.ZipFile(zp, 'r') as z:
+                    # First pass: collect all media filenames
+                    for info in z.infolist():
+                        name = info.filename
+                        ext  = os.path.splitext(name)[1].lower()
+                        if ext in ALL_EXTS:
+                            media_basename = os.path.basename(name)
+                            all_media_files.add(media_basename)
+                    
+                    # Second pass: process all files
                     for info in z.infolist():
                         name = info.filename
                         ext  = os.path.splitext(name)[1].lower()
@@ -568,26 +640,17 @@ def run_transfer(config):
                                 meta = json.loads(raw.decode("utf-8", errors="ignore"))
                                 
                                 if isinstance(meta, dict) and len(meta) > 0:
-                                    # Extract the media filename this JSON belongs to
-                                    # Zip path format: Google Photos/Album/IMG_1234.JPG.supplemental-metadata.json
-                                    #           or: Google Photos/Album/IMG_1234.JPG.json
-                                    #           or: Google Photos/Album/IMG_1234.json
-                                    
                                     json_basename = os.path.basename(name)
                                     
-                                    # Remove .json extension
-                                    without_json = json_basename[:-5] if json_basename.endswith(".json") else json_basename
+                                    # Use fuzzy matching to find the media file this JSON belongs to
+                                    matched_media = find_matching_json(json_basename, all_media_files)
                                     
-                                    # Remove .supplemental-metadata suffix if present
-                                    media_key = without_json.replace(".supplemental-metadata", "")
-                                    
-                                    # media_key is now the media filename (e.g., "IMG_1234.JPG")
-                                    
-                                    # Merge metadata: if we have multiple JSON files for same media, merge them
-                                    if media_key not in meta_map:
-                                        meta_map[media_key] = meta
-                                    else:
-                                        meta_map[media_key].update(meta)
+                                    if matched_media:
+                                        # Merge metadata: if we have multiple JSON files for same media, merge them
+                                        if matched_media not in meta_map:
+                                            meta_map[matched_media] = meta
+                                        else:
+                                            meta_map[matched_media].update(meta)
                             except Exception:
                                 pass
             except Exception as e:
