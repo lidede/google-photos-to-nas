@@ -10,6 +10,7 @@ import hashlib
 import webbrowser
 import struct
 import paramiko
+import difflib
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -59,73 +60,61 @@ def set_phase(phase, pct=None):
 
 # ── Metadata helpers ────────────────────────────────────────────────────────
 
-def extract_media_filename_from_json(json_basename):
+def find_matching_media(json_basename, all_media_files):
     """
-    Extract the media filename from a JSON sidecar filename.
-    Handles both full and truncated names by finding the media extension.
+    Find the best matching media file for a JSON sidecar using string similarity.
+    
+    Strategy:
+    1. Remove .json from JSON filename
+    2. Find all media files that start with the JSON name (exact prefix match)
+    3. If multiple matches, use SequenceMatcher to find the closest one
+    4. If no exact prefix match, find the closest match by similarity ratio
     
     Examples:
-    - "image.jpg.json" → "image.jpg"
-    - "image.jpg.supplemental-metadata.json" → "image.jpg"
-    - "image.jpg.supplemental-met.json" (truncated) → "image.jpg"
-    - "image.jpg.supplem.json" → "image.jpg"
-    - "image.jpg.s.json" → "image.jpg"
+    - "image.jpg.json" → matches "image.jpg"
+    - "image.jpg.supplemental-metadata.json" → matches "image.jpg"
+    - "image.jpg.supplemental-met.json" (truncated) → matches "image.jpg"
+    - "image.jpg.s.json" (heavily truncated) → matches "image.jpg"
     
-    Returns the media filename, or None if it can't be determined.
+    Returns the media filename that this JSON describes, or None.
     """
     if not json_basename.endswith(".json"):
         return None
     
     # Remove .json extension
-    without_json = json_basename[:-5]
+    json_name_without_ext = json_basename[:-5]
     
-    # Try to find where the media extension is
-    # Look for known media extensions in the filename
-    media_ext_pattern = r'\.(jpg|jpeg|png|gif|bmp|webp|heic|heif|tiff|tif|mp4|mov|avi|mkv|3gp|m4v|wmv|mts)(?:\.|$)'
-    match = re.search(media_ext_pattern, without_json, re.IGNORECASE)
-    
-    if not match:
+    if not all_media_files:
         return None
     
-    # Get everything up to and including the media extension
-    end_pos = match.end(1) + 1  # +1 to include the dot before extension
-    media_filename = without_json[:end_pos]
+    best_match = None
+    best_ratio = 0
     
-    return media_filename
-
-
-def find_matching_json(json_basename, all_media_files):
-    """
-    Find which media file this JSON sidecar belongs to.
-    
-    Strategy:
-    1. Extract expected media filename from JSON name
-    2. Try exact match
-    3. Try case-insensitive match
-    4. Try prefix match (for edge cases with weird truncation)
-    
-    Returns the media filename that this JSON describes, or None.
-    """
-    media_filename = extract_media_filename_from_json(json_basename)
-    
-    if not media_filename:
-        return None
-    
-    media_filename_lower = media_filename.lower()
-    
-    # Try exact match first
-    if media_filename in all_media_files:
-        return media_filename
-    
-    # Try case-insensitive match
     for media_file in all_media_files:
-        if media_file.lower() == media_filename_lower:
+        # Remove media extension to compare base names
+        media_base = os.path.splitext(media_file)[0]
+        
+        # Strategy 1: Check if JSON name starts with media filename (most common case)
+        # E.g., "image.jpg.supplemental-metadata" starts with "image.jpg"
+        if json_name_without_ext.startswith(media_base):
             return media_file
+        
+        # Strategy 2: Check if media filename starts with JSON base (for truncated cases)
+        # E.g., "image.jpg" starts with "image.jpg.s"
+        if media_base.startswith(json_name_without_ext):
+            return media_file
+        
+        # Strategy 3: Use sequence matching for fuzzy matching
+        # Calculate similarity ratio between JSON name and media file name
+        ratio = difflib.SequenceMatcher(None, json_name_without_ext.lower(), media_base.lower()).ratio()
+        
+        if ratio > best_ratio:
+            best_ratio = ratio
+            best_match = media_file
     
-    # Try prefix match: media file starts with the extracted name
-    for media_file in all_media_files:
-        if media_file.lower().startswith(media_filename_lower):
-            return media_file
+    # Only return a match if similarity is high enough (80%+)
+    if best_ratio > 0.8:
+        return best_match
     
     return None
 
@@ -618,7 +607,7 @@ def run_transfer(config):
 
         all_entries = []   # list of (zip_path, ZipInfo)
         meta_map    = {}   # key: media basename, value: merged metadata dict
-        all_media_files = set()  # Track all media filenames for fuzzy matching
+        all_media_files = set()  # Track all media filenames for matching
 
         for zp in zip_paths:
             zname = os.path.basename(zp)
@@ -651,8 +640,8 @@ def run_transfer(config):
                                 if isinstance(meta, dict) and len(meta) > 0:
                                     json_basename = os.path.basename(name)
                                     
-                                    # Use fuzzy matching to find the media file this JSON belongs to
-                                    matched_media = find_matching_json(json_basename, all_media_files)
+                                    # Use similarity matching to find the media file this JSON belongs to
+                                    matched_media = find_matching_media(json_basename, all_media_files)
                                     
                                     if matched_media:
                                         # Merge metadata: if we have multiple JSON files for same media, merge them
@@ -750,7 +739,7 @@ def run_transfer(config):
                     sftp_makedirs(sftp, dest_dir)
                     created_dirs.add(dest_dir)
 
-                # ── Skip existing ─────────────────────────────────────────────
+                # ── Skip existing ─────���───────────────────────────────────────
                 if skip_ex:
                     try:
                         sftp.stat(dest_path)
