@@ -31,9 +31,22 @@ pip install paramiko piexif
 
 **Optional — for extended format support:**
 
+For **video metadata embedding** (creation time + GPS), you need two things:
+
+1. Install the **ffmpeg program** on your system:
+   - **Windows:** Download from [ffmpeg.org](https://ffmpeg.org/download.html) and add it to your PATH, or install via `winget install ffmpeg` / `choco install ffmpeg`
+   - **macOS:** `brew install ffmpeg`
+   - **Linux:** `sudo apt install ffmpeg` (Debian/Ubuntu) or `sudo dnf install ffmpeg` (Fedora)
+
+2. Install the **Python wrapper:**
+   ```
+   pip install ffmpeg-python
+   ```
+
+For **TIFF metadata embedding**, install Pillow:
+
 ```
-pip install ffmpeg-python   # video metadata embedding (creation time + GPS)
-pip install pillow          # TIFF metadata embedding
+pip install pillow
 ```
 
 The wizard works without these — photos and videos still transfer, but video metadata and TIFF metadata embedding are skipped with a warning.
@@ -60,7 +73,8 @@ The wizard works without these — photos and videos still transfer, but video m
 
 ### On your Synology NAS
 
-- **SSH enabled** — DSM → Control Panel → Terminal & SNMP → tick *Enable SSH service* → Apply (SFTP runs over SSH)
+- **SSH enabled** — DSM → Control Panel → Terminal & SNMP → tick *Enable SSH service* → Apply
+- **SFTP enabled** — DSM → Control Panel → File Services → FTP tab → SFTP section → tick *Enable SFTP service* → Apply
 - Your DSM user must have **Read/Write** permission on the destination shared folder — DSM → Control Panel → Shared Folder → select folder → Edit → Permission tab
 
 ---
@@ -191,7 +205,7 @@ For TIFF and video metadata, install the optional packages: `pip install pillow 
 
 **"Authentication failed"**
 - Double-check your DSM username and password
-- Make sure SSH is enabled in DSM → Control Panel → Terminal & SNMP → Enable SSH service
+- Make sure **both** SSH (Terminal & SNMP) and SFTP (File Services → FTP → SFTP) are enabled in DSM
 
 **"Folder not found" on scan**
 - Windows: use backslashes — `C:\Users\You\Downloads\Takeout`
@@ -217,8 +231,8 @@ For TIFF and video metadata, install the optional packages: `pip install pillow 
 - This can happen with photos synced from other apps — the original date may already be embedded in the file
 
 **Video metadata not embedded**
-- Install the optional package: `pip install ffmpeg-python`
-- If already installed and still not working, check the terminal for ffmpeg errors
+- Install the `ffmpeg` program first (see Requirements above), then `pip install ffmpeg-python`
+- If both are installed and it still fails, check the terminal for ffmpeg errors — make sure `ffmpeg` is on your PATH by running `ffmpeg -version` in a terminal
 
 **TIFF metadata not embedded**
 - Install the optional package: `pip install pillow`
@@ -241,7 +255,8 @@ For TIFF and video metadata, install the optional packages: `pip install pillow 
 |---------|---------|---------|
 | `paramiko` | SFTP connection to Synology NAS | ✅ Required |
 | `piexif` | Read and write EXIF metadata in JPEG/TIFF files | ✅ Required |
-| `ffmpeg-python` | Embed metadata into video files | Optional |
+| `ffmpeg` (program) | Called by ffmpeg-python to process video files — install separately via your OS package manager | Optional |
+| `ffmpeg-python` | Python wrapper that calls the ffmpeg program | Optional |
 | `pillow` | Embed metadata into TIFF files | Optional |
 
 Install required packages: `pip install paramiko piexif`
