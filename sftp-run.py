@@ -5,6 +5,7 @@ import os
 import io
 import re
 import threading
+import time
 import zipfile
 import hashlib
 import webbrowser
@@ -38,7 +39,7 @@ transfer_status = {
     "running": False, "done": False,
     "uploaded": 0, "skipped": 0, "errors": 0, "total": 0,
     "photos_processed": 0, "videos_processed": 0,
-    "meta_fixed": 0,
+    "meta_fixed": 0, "last_speed_mbps": 0,
     "phase": "", "pct": 0, "current_file": "",
     "log": [], "error": None
 }
@@ -59,79 +60,72 @@ def set_phase(phase, pct=None):
 
 # ── Metadata helpers ────────────────────────────────────────────────────────
 
-def find_matching_media(json_basename, media_basename_map):
+def find_matching_media(json_basename, media_basename_map, truncated_media_map):
     """
-    Find the best matching media file for a JSON sidecar using a fast lookup strategy.
-    
-    Strategy:
-    1. Remove .json from JSON filename to get the base name
-    2. Try direct lookup in the media_basename_map (instant O(1))
-    3. If no exact match, try removing common suffixes (.supplemental-metadata, .supplemental-met, etc.)
-    4. Return the matching media file, or None
-    
-    Examples:
-    - "image.jpg.json" → "image.jpg" (direct match)
-    - "image.jpg.supplemental-metadata.json" → "image.jpg" (suffix removal)
-    - "image.jpg.supplemental-met.json" → "image.jpg" (truncated suffix removal)
-    - "image.jpg.s.json" → "image.jpg" (aggressive truncation)
-    
+    Find the best matching media file for a JSON sidecar.
+
+    Google Takeout JSON naming rules (all observed in the wild):
+      photo.jpg           → photo.jpg.json          (primary sidecar)
+      photo.jpg           → photo.json               (rare, no double-ext)
+      photo.jpg           → photo.jpg.supplemental-metadata.json
+      long_name_trun…jpg  → long_name_trun…jpg.json  (46-char truncation)
+      long_name_trun…jpg  → long_name_trun….json      (stem truncated at 46)
+      photo(1).jpg        → photo(1).jpg.json         (duplicate counter)
+
     Args:
-        json_basename: The JSON filename (e.g., "image.jpg.json")
-        media_basename_map: Dict mapping media basenames to themselves for O(1) lookup
-        
-    Returns:
-        The matching media basename, or None if no match found.
+        json_basename:       e.g. "IMG_1234.jpg.json"
+        media_basename_map:  { "IMG_1234.jpg": "IMG_1234.jpg", ... }  full names
+        truncated_media_map: { "IMG_1234": "IMG_1234.jpg", ... }      stems → full name
     """
-    if not json_basename.endswith(".json"):
+    if not json_basename.lower().endswith(".json"):
         return None
-    
-    # Remove .json extension
-    json_name_without_ext = json_basename[:-5]
-    
-    if not media_basename_map:
-        return None
-    
-    # Strategy 1: Try direct lookup (most common case)
-    # This handles "image.jpg.json" → "image.jpg"
-    if json_name_without_ext in media_basename_map:
-        return json_name_without_ext
-    
-    # Strategy 2: Remove known suffixes and try again
-    # This handles "image.jpg.supplemental-metadata" → "image.jpg"
-    candidates_to_try = []
-    
-    # Try removing common supplemental-metadata suffixes
-    suffixes_to_try = [
-        '.supplemental-metadata',
-        '.supplemental-metada',  # truncated
-        '.supplemental-met',     # truncated
-        '.supplemental-',        # truncated
-        '.supplem',              # truncated
-        '.s',                    # heavily truncated
-    ]
-    
-    for suffix in suffixes_to_try:
-        if json_name_without_ext.endswith(suffix):
-            candidate = json_name_without_ext[:-len(suffix)]
-            if candidate and candidate not in candidates_to_try:
-                candidates_to_try.append(candidate)
-    
-    # Try each candidate
-    for candidate in candidates_to_try:
-        if candidate in media_basename_map:
-            return candidate
-    
+
+    # Step 1 — strip .json
+    without_json = json_basename[:-5]           # "IMG_1234.jpg"
+
+    # Step 2 — strip supplemental-metadata suffix (all truncation variants)
+    # Google truncates the whole filename at 46 chars before adding .json,
+    # so the suffix itself may be cut off at any point after the dot.
+    import re as _re
+    without_supp = _re.sub(r'\.supplemental[-\w]*$', '', without_json)  # covers all truncations
+    if not without_supp:
+        without_supp = without_json  # nothing was stripped
+
+    # Step 3 — build candidate list in priority order
+    candidates = []
+    for name in [without_json, without_supp]:
+        if name and name not in candidates:
+            candidates.append(name)
+        # Also try first 46 chars (Google truncates here)
+        if len(name) > 46:
+            t = name[:46]
+            if t not in candidates:
+                candidates.append(t)
+        # Also try stem (strip last extension) — handles "photo.json" → "photo.jpg"
+        stem = name.rsplit(".", 1)[0] if "." in name else name
+        if stem and stem not in candidates:
+            candidates.append(stem)
+        if len(stem) > 46:
+            t = stem[:46]
+            if t not in candidates:
+                candidates.append(t)
+
+    # Step 4 — try each candidate: exact match first, then truncated stem match
+    for c in candidates:
+        if c in media_basename_map:
+            return media_basename_map[c]
+        if c in truncated_media_map:
+            return truncated_media_map[c]
+
     return None
 
 
 def find_meta_for(fname, meta_map):
     """
-    Direct lookup: try to find metadata for a file by matching its basename
-    in the meta_map. Meta_map keys are media basenames.
+    Lookup metadata for a media file by its basename.
+    meta_map keys are always full media basenames (e.g. "IMG_1234.jpg").
     """
-    if fname in meta_map:
-        return meta_map[fname]
-    return None
+    return meta_map.get(fname)
 
 
 def parse_timestamp(meta):
@@ -588,7 +582,7 @@ def run_transfer(config):
         transfer_status.update({
             "running": True, "done": False, "uploaded": 0, "skipped": 0,
             "errors": 0, "total": 0, "photos_processed": 0, "videos_processed": 0,
-            "meta_fixed": 0,
+            "meta_fixed": 0, "last_speed_mbps": 0,
             "phase": "", "pct": 0, "current_file": "", "log": [], "error": None
         })
 
@@ -610,60 +604,96 @@ def run_transfer(config):
         set_phase("Scanning zip files", 2)
         bg_log(f"Scanning {len(zip_paths)} zip file(s)…", "info")
 
-        all_entries = []   # list of (zip_path, ZipInfo)
-        meta_map    = {}   # key: media basename, value: merged metadata dict
-        media_basename_map = {}  # key: media basename, value: media basename (for O(1) lookup)
+        all_entries        = []  # list of (zip_path, ZipInfo)
+        meta_map           = {}  # media_basename → merged metadata dict
+        media_basename_map = {}  # full_basename  → full_basename  (exact match)
+        truncated_media_map = {} # stem/truncated → full_basename  (fuzzy match)
+
+        # ── Pass 1: collect ALL media filenames across ALL zips ─────────────
+        # Must be global before JSON matching starts — JSON in zip #3 may
+        # match a media file from zip #1.
+        bg_log("Pass 1: inventorying all media files across all zips…", "info")
+        all_json_entries = []   # (zp, ZipInfo) for every .json file found
 
         for zp in zip_paths:
             zname = os.path.basename(zp)
-            bg_log(f"Opening {zname}…")
             try:
                 with zipfile.ZipFile(zp, 'r') as z:
-                    # First pass: collect all media filenames into a dict for O(1) lookup
                     for info in z.infolist():
                         name = info.filename
                         ext  = os.path.splitext(name)[1].lower()
+                        bname = os.path.basename(name)
                         if ext in ALL_EXTS:
-                            media_basename = os.path.basename(name)
-                            media_basename_map[media_basename] = media_basename
-                    
-                    # Second pass: process all files
-                    for info in z.infolist():
-                        name = info.filename
-                        ext  = os.path.splitext(name)[1].lower()
-
-                        if ext in ALL_EXTS:
-                            # Media file: store it
                             all_entries.append((zp, info))
-
+                            # Full basename → full basename
+                            media_basename_map[bname] = bname
+                            # Stem (no ext) → full basename  (for "photo.json" → "photo.jpg")
+                            stem = bname.rsplit(".", 1)[0] if "." in bname else bname
+                            truncated_media_map.setdefault(stem, bname)
+                            # Also index the first 46 chars of stem (Takeout truncation)
+                            if len(stem) > 46:
+                                truncated_media_map.setdefault(stem[:46], bname)
+                            if len(bname) > 46:
+                                truncated_media_map.setdefault(bname[:46], bname)
                         elif ext == ".json":
-                            # ANY .json file could be metadata
-                            try:
-                                raw  = z.read(name)
-                                meta = json.loads(raw.decode("utf-8", errors="ignore"))
-                                
-                                if isinstance(meta, dict) and len(meta) > 0:
-                                    json_basename = os.path.basename(name)
-                                    
-                                    # Use fast lookup to find the media file this JSON belongs to
-                                    matched_media = find_matching_media(json_basename, media_basename_map)
-                                    
-                                    if matched_media:
-                                        # Merge metadata: if we have multiple JSON files for same media, merge them
-                                        if matched_media not in meta_map:
-                                            meta_map[matched_media] = meta
-                                        else:
-                                            meta_map[matched_media].update(meta)
-                            except Exception:
-                                pass
+                            all_json_entries.append((zp, info))
             except Exception as e:
-                bg_log(f"Cannot open {zname}: {e}", "err")
+                bg_log(f"Cannot open {os.path.basename(zp)}: {e}", "err")
+
+        bg_log(f"Pass 1 done: {len(all_entries)} media files, {len(all_json_entries)} JSON files found.", "ok")
+
+        # ── Pass 2: match every JSON sidecar to its media file ───────────────
+        # Group JSONs by zip path so each zip is opened exactly once.
+        bg_log("Pass 2: matching JSON sidecars to media files…", "info")
+        json_matched   = 0
+        json_unmatched = 0
+        json_errors    = 0
+
+        from collections import defaultdict
+        jsons_by_zip = defaultdict(list)
+        for zp, info in all_json_entries:
+            jsons_by_zip[zp].append(info)
+
+        for zp, infos in jsons_by_zip.items():
+            try:
+                with zipfile.ZipFile(zp, 'r') as z:
+                    for info in infos:
+                        try:
+                            raw  = z.read(info.filename)
+                            meta = json.loads(raw.decode("utf-8", errors="ignore"))
+                            if not isinstance(meta, dict) or not meta:
+                                continue
+
+                            json_basename = os.path.basename(info.filename)
+                            matched_media = find_matching_media(json_basename, media_basename_map, truncated_media_map)
+
+                            if matched_media:
+                                if matched_media not in meta_map:
+                                    meta_map[matched_media] = dict(meta)
+                                else:
+                                    # Merge: only fill missing keys, protect photoTakenTime
+                                    existing = meta_map[matched_media]
+                                    for k, v in meta.items():
+                                        if k not in existing:
+                                            existing[k] = v
+                                        elif k == "photoTakenTime":
+                                            pass  # primary sidecar value is more reliable
+                                json_matched += 1
+                            else:
+                                json_unmatched += 1
+                        except Exception:
+                            json_errors += 1
+            except Exception as e:
+                bg_log(f"Cannot open zip for JSON pass: {os.path.basename(zp)}: {e}", "err")
+
+        bg_log(f"Pass 2 done: {json_matched} matched, {json_unmatched} unmatched, {json_errors} parse errors.", "ok")
+        if json_unmatched > 0:
+            bg_log(f"  → Unmatched JSONs are usually album-level metadata or editor sidefiles — safe to ignore.", "info")
 
         total = len(all_entries)
         with status_lock:
             transfer_status["total"] = total
-        bg_log(f"Found {total} photo/video files.", "ok")
-        bg_log(f"Loaded {len(meta_map)} metadata entries.", "ok")
+        bg_log(f"Ready to upload {total} media file(s) with metadata for {len(meta_map)}.", "ok")
         set_phase("Scan complete", 15)
 
         # ── Phase 2: Connect SFTP ─────────────────────────────────────────────
@@ -690,78 +720,167 @@ def run_transfer(config):
         set_phase("Uploading", 22)
         bg_log(f"Starting upload of {total} files…", "info")
 
-        created_dirs = set()
+        CHUNK      = 32 * 1024 * 1024  # 32 MB chunks — sweet spot for NAS throughput
+        SMALL_FILE = 32 * 1024 * 1024  # files <= 32 MB use buffered path
+        N_WORKERS  = 4                  # parallel SFTP channels
 
-        for i, (zp, info) in enumerate(all_entries):
-            fname = os.path.basename(info.filename)
-            ext = os.path.splitext(fname)[1].lower()
-            is_video = ext in VIDEO_EXTS
-            
+        created_dirs      = set()
+        created_dirs_lock = threading.Lock()
+        counter           = [0]
+        counter_lock      = threading.Lock()
+
+        # ── Open one dedicated SFTP channel per worker thread ─────────────────
+        # Each thread owns its channel for the lifetime of the transfer —
+        # no shared pool contention, no blocking between workers.
+        def make_worker_channel():
+            try:
+                ch = ssh.open_sftp()
+                ch.get_channel().settimeout(300)   # 5-min timeout per operation
+                return ch
+            except Exception as e:
+                bg_log(f"Could not open extra SFTP channel: {e}", "warn")
+                return None
+
+        extra_channels = [make_worker_channel() for _ in range(N_WORKERS - 1)]
+        all_channels   = [sftp] + [c for c in extra_channels if c is not None]
+        bg_log(f"Opened {len(all_channels)} parallel SFTP channel(s).", "ok")
+
+        # Give each thread its own channel via thread-local storage
+        import threading as _threading
+        _tlocal = _threading.local()
+        _chan_iter = iter(all_channels)
+        _chan_lock = threading.Lock()
+
+        def get_thread_channel():
+            if not hasattr(_tlocal, 'ch') or _tlocal.ch is None:
+                with _chan_lock:
+                    try:
+                        _tlocal.ch = next(_chan_iter)
+                    except StopIteration:
+                        # More threads than channels — open a new one
+                        _tlocal.ch = make_worker_channel() or sftp
+            return _tlocal.ch
+
+        def upload_one(entry):
+            zp, info = entry
+            fname    = os.path.basename(info.filename)
+            ext      = os.path.splitext(fname)[1].lower()
+
+            with counter_lock:
+                counter[0] += 1
+                i = counter[0]
             with status_lock:
                 transfer_status["current_file"] = fname
                 transfer_status["pct"] = 22 + int(i / max(total, 1) * 75)
 
             try:
-                with zipfile.ZipFile(zp, 'r') as z:
-                    data = z.read(info.filename)
+                file_size = info.file_size
+                ch        = get_thread_channel()
 
-                # ── Dedup ─────────────────────────────────────────────────────
-                if do_dedup:
-                    h = sha1_blob(data)
-                    if h in seen_hashes:
-                        with status_lock: transfer_status["skipped"] += 1
-                        bg_log(f"Duplicate skipped: {fname}", "warn")
-                        continue
-                    seen_hashes.add(h)
-
-                # ── Find metadata & apply EXIF ────────────────────────────────
+                # ── Metadata lookup (pure dict, instant) ──────────────────────
                 meta = find_meta_for(fname, meta_map) if do_meta else None
                 dt, year, month = parse_timestamp(meta) if meta else (None, None, None)
 
-                if meta and do_meta:
-                    data, was_fixed = apply_metadata(fname, data, meta)
-                    if was_fixed:
-                        with status_lock: 
-                            transfer_status["meta_fixed"] += 1
-                            if is_video:
-                                transfer_status["videos_processed"] += 1
-                            else:
-                                transfer_status["photos_processed"] += 1
-                        
-                        lat, lon, _ = parse_gps(meta)
-                        gps_note = f" GPS({lat:.4f},{lon:.4f})" if lat else ""
-                        file_type = "Video" if is_video else "Photo"
-                        bg_log(f"  ↳ {file_type} metadata restored: {dt.strftime('%Y-%m-%d %H:%M') if dt else '?'}{gps_note} → {fname}", "ok")
-                elif meta is None and do_meta:
-                    bg_log(f"  ↳ No sidecar found for: {fname}", "warn")
-
                 # ── Destination path ──────────────────────────────────────────
-                sub      = subfolder(year, month, fold_mode)
-                dest_dir = f"{sftp_base}/{sub}".rstrip("/") if sub else sftp_base
+                sub       = subfolder(year, month, fold_mode)
+                dest_dir  = f"{sftp_base}/{sub}".rstrip("/") if sub else sftp_base
                 dest_path = f"{dest_dir}/{fname}"
 
-                if dest_dir not in created_dirs:
-                    sftp_makedirs(sftp, dest_dir)
-                    created_dirs.add(dest_dir)
+                # ── Ensure remote dir exists (cached) ─────────────────────────
+                with created_dirs_lock:
+                    if dest_dir not in created_dirs:
+                        sftp_makedirs(ch, dest_dir)
+                        created_dirs.add(dest_dir)
 
                 # ── Skip existing ─────────────────────────────────────────────
                 if skip_ex:
                     try:
-                        sftp.stat(dest_path)
+                        ch.stat(dest_path)
                         with status_lock: transfer_status["skipped"] += 1
                         bg_log(f"Already on NAS, skipped: {fname}", "warn")
-                        continue
+                        return
                     except FileNotFoundError:
                         pass
 
-                # ── Upload ────────────────────────────────────────────────────
-                sftp.putfo(io.BytesIO(data), dest_path)
+                # ── Read file data ─────────────────────────────────────────────
+                # For small files: read fully into memory so we can patch EXIF.
+                # For large files: stream in chunks — never fully in RAM.
+                if file_size <= SMALL_FILE:
+                    with zipfile.ZipFile(zp, 'r') as z:
+                        data = z.read(info.filename)
 
-                # Set file modification time to match photo date
+                    # Dedup on buffered data
+                    if do_dedup:
+                        digest = hashlib.sha1(data).hexdigest()
+                        with status_lock:
+                            if digest in seen_hashes:
+                                transfer_status["skipped"] += 1
+                                bg_log(f"Duplicate skipped: {fname}", "warn")
+                                return
+                            seen_hashes.add(digest)
+
+                    # EXIF patch
+                    if meta and do_meta:
+                        data, was_fixed = apply_metadata(fname, data, meta)
+                        if was_fixed:
+                            with status_lock: transfer_status["meta_fixed"] += 1
+                            lat, lon, _ = parse_gps(meta)
+                            gps_note = f" GPS({lat:.4f},{lon:.4f})" if lat else ""
+                            bg_log(f"  ↳ EXIF restored: {dt.strftime('%Y-%m-%d %H:%M') if dt else '?'}{gps_note} → {fname}", "ok")
+                    elif do_meta and meta is None:
+                        bg_log(f"  ↳ No sidecar: {fname}", "warn")
+
+                    # Upload buffered
+                    t0 = time.monotonic()
+                    ch.putfo(io.BytesIO(data), dest_path)
+                    elapsed = time.monotonic() - t0
+                    speed   = (file_size / elapsed / 1048576) if elapsed > 0 else 0
+                    with status_lock: transfer_status["last_speed_mbps"] = round(speed, 1)
+
+                else:
+                    # Large file — stream directly zip → NAS, dedup via streaming hash
+                    if do_meta and meta is None:
+                        bg_log(f"  ↳ No sidecar: {fname}", "warn")
+
+                    h = hashlib.sha1() if do_dedup else None
+                    with zipfile.ZipFile(zp, 'r') as z:
+                        with z.open(info) as src:
+                            if do_dedup:
+                                while True:
+                                    chunk = src.read(CHUNK)
+                                    if not chunk: break
+                                    h.update(chunk)
+                                digest = h.hexdigest()
+                                with status_lock:
+                                    if digest in seen_hashes:
+                                        transfer_status["skipped"] += 1
+                                        bg_log(f"Duplicate skipped: {fname}", "warn")
+                                        return
+                                    seen_hashes.add(digest)
+
+                    # Stream upload
+                    t0 = time.monotonic()
+                    with zipfile.ZipFile(zp, 'r') as z:
+                        with z.open(info) as src:
+                            with ch.open(dest_path, 'wb') as dst:
+                                # set_pipelined is the public API (pipelining = no ACK wait per packet)
+                                try:
+                                    dst.set_pipelined(True)
+                                except AttributeError:
+                                    pass  # older Paramiko — continue without pipelining
+                                while True:
+                                    chunk = src.read(CHUNK)
+                                    if not chunk: break
+                                    dst.write(chunk)
+                    elapsed = time.monotonic() - t0
+                    speed   = (file_size / elapsed / 1048576) if elapsed > 0 else 0
+                    with status_lock: transfer_status["last_speed_mbps"] = round(speed, 1)
+                    bg_log(f"  Streamed {file_size // 1048576} MB in {elapsed:.1f}s = {speed:.1f} MB/s", "info")
+
+                # ── Set file modification time ────────────────────────────────
                 if dt:
-                    ts = int(dt.timestamp())
                     try:
-                        sftp.utime(dest_path, (ts, ts))
+                        ch.utime(dest_path, (int(dt.timestamp()), int(dt.timestamp())))
                     except Exception:
                         pass
 
@@ -775,6 +894,17 @@ def run_transfer(config):
                     bg_log(f"ACCESS DENIED: {fname} — check DSM folder permissions.", "err")
                 else:
                     bg_log(f"Error on {fname}: {err_str}", "err")
+
+        # ── Run uploads in parallel ───────────────────────────────────────────
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+        bg_log(f"Starting parallel upload ({N_WORKERS} workers)…", "info")
+        with ThreadPoolExecutor(max_workers=N_WORKERS) as executor:
+            futures = {executor.submit(upload_one, e): e for e in all_entries}
+            for future in as_completed(futures):
+                try:
+                    future.result()
+                except Exception as e:
+                    bg_log(f"Worker error: {e}", "err")
 
         sftp.close()
         ssh.close()

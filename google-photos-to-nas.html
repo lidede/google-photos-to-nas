@@ -36,7 +36,7 @@
   .card-title{font-size:.68rem;color:var(--accent);letter-spacing:.08em;text-transform:uppercase;margin-bottom:.9rem}
   .field{margin-bottom:.9rem}
   .field label{display:block;font-size:.7rem;color:var(--muted);margin-bottom:.35rem}
-  .field input,.field select{width:100%;background:var(--surface2);border:1px solid var(--border);border-radius:var(--rs);padding:.55rem .8rem;font-family:'DM Mono',monospace;font-size:.8rem;color:var(--text)}
+  .field input,.field select{width:100%;background:var(--surface2);border:1px solid var(--border);border-radius:var(--rs);padding:.55rem .8rem;font-family:'DM Mono',monospace;font-size:.8rem;color:var(--text);outline:none;transition:border-color .15s}
   .field input:focus,.field select:focus{border-color:var(--accent-b)}
   .field input::placeholder{color:var(--muted)}
   .field select option{background:var(--surface2)}
@@ -58,7 +58,7 @@
   .file-item{display:flex;align-items:center;justify-content:space-between;background:var(--surface2);border:1px solid var(--border);border-radius:var(--rs);padding:.45rem .8rem;font-size:.72rem}
   .file-name{color:var(--text);flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;margin-right:.5rem}
   .file-size{color:var(--muted);flex-shrink:0}
-  .stat-grid{display:grid;grid-template-columns:repeat(5,1fr);gap:.65rem;margin-bottom:1.25rem}
+  .stat-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:.65rem;margin-bottom:1.25rem}
   .stat-card{background:var(--surface2);border:1px solid var(--border);border-radius:var(--rs);padding:.9rem}
   .stat-label{font-size:.62rem;color:var(--muted);text-transform:uppercase;letter-spacing:.04em;margin-bottom:.3rem}
   .stat-value{font-family:'Fraunces',serif;font-size:1.5rem;font-weight:300;color:var(--accent)}
@@ -112,19 +112,16 @@
   <h1>Before we start</h1>
   <p class="sub">Two things you need to enable on your Synology NAS before using this tool.</p>
   <div class="card">
-    <div class="card-title">Enable SFTP on your Synology NAS</div>
+    <div class="card-title">Enable SSH on your Synology NAS</div>
     <div class="guide-step"><div class="guide-num">1</div><div>
-      <div class="guide-text">Open <strong>DSM</strong> → <strong>Control Panel</strong> → <strong>File Services</strong></div>
+      <div class="guide-text">Open <strong>DSM</strong> → <strong>Control Panel</strong> → <strong>Terminal &amp; SNMP</strong></div>
     </div></div>
     <div class="guide-step"><div class="guide-num">2</div><div>
-      <div class="guide-text">Click the <strong>FTP</strong> tab, then scroll down to the <strong>SFTP</strong> section</div>
+      <div class="guide-text">Tick <strong>Enable SSH service</strong>. Port defaults to <code>22</code> — leave it unless you changed it.</div>
     </div></div>
     <div class="guide-step"><div class="guide-num">3</div><div>
-      <div class="guide-text">Tick <strong>Enable SFTP service</strong>. Port defaults to <code>22</code> — leave it unless you changed it.</div>
-      <div class="guide-sub">SFTP is the secure file transfer protocol used by this wizard. You can disable it again after the transfer if you prefer.</div>
-    </div></div>
-    <div class="guide-step"><div class="guide-num">4</div><div>
       <div class="guide-text">Click <strong>Apply</strong>.</div>
+      <div class="guide-sub">SSH is needed for SFTP file transfer. You can disable it again after the transfer if you prefer.</div>
     </div></div>
   </div>
   <div class="card">
@@ -137,7 +134,7 @@
       <div class="guide-sub">If you have a DS923+ or a multi-volume NAS, it may be <code>/volume2/photo</code> etc. Check in Storage Manager → Volume.</div>
     </div></div>
   </div>
-  <div class="notice n-warn"><strong>⚠ Common "Access Denied" cause:</strong> Using <code>/photo/...</code> instead of <code>/volume1/photo/...</code> is the #1 reason SFTP uploads fail on Synology.</div>
+  <div class="notice n-warn"><strong>⚠ Common "Access Denied" cause:</strong> Using <code>/photo/...</code> instead of <code>/volume1/photo/...</code> is the #1 reason SFTP uploads fail on Synology. Always use the full volume path.</div>
   <div class="btn-row"><button class="btn btn-primary" onclick="goTo(1)">Got it — continue →</button></div>
 </div>
 
@@ -148,13 +145,10 @@
   <div class="card">
     <div class="card-title">Zip file folder path</div>
     <div class="path-row">
-      <input type="text" id="zipFolder" placeholder="e.g. /Users/collins/Downloads/Takeout">
+      <input type="text" id="zipFolder" placeholder="e.g. C:\Users\Collins\Downloads\Takeout">
       <button class="btn btn-secondary btn-sm" onclick="scanFolder()">Scan</button>
     </div>
-    <p style="font-size:.68rem;color:var(--muted);margin-top:.6rem">
-      <strong>Windows:</strong> <code>C:\Users\Collins\Downloads\Takeout</code><br>
-      <strong>macOS/Linux:</strong> <code>/Users/collins/Downloads/Takeout</code> or <code>/home/collins/Downloads/Takeout</code>
-    </p>
+    <p style="font-size:.68rem;color:var(--muted);margin-top:.6rem">Copy the path from File Explorer's address bar and paste it here.</p>
   </div>
   <div id="scanResult" style="display:none"></div>
   <div class="file-list" id="fileList"></div>
@@ -167,11 +161,11 @@
 <!-- 2: NAS -->
 <div class="panel" id="p2">
   <h1>Synology NAS connection</h1>
-  <p class="sub">SFTP uses port 22 by default. Make sure SFTP is enabled in DSM as shown in step 1.</p>
+  <p class="sub">SFTP uses SSH (port 22 by default). Make sure SSH is enabled in DSM as shown in step 1.</p>
   <div class="card">
     <div class="card-title">Connection details</div>
     <div class="field"><label>NAS IP address</label><input type="text" id="nasHost" placeholder="e.g. 192.168.1.100"></div>
-    <div class="field"><label>SFTP port</label><input type="number" id="nasPort" value="22"></div>
+    <div class="field"><label>SSH port</label><input type="number" id="nasPort" value="22"></div>
     <div class="field"><label>Username</label><input type="text" id="nasUser" placeholder="Your DSM username" autocomplete="username"></div>
     <div class="field"><label>Password</label><input type="password" id="nasPass" placeholder="Your DSM password" autocomplete="current-password"></div>
     <div class="field">
@@ -191,10 +185,10 @@
 <!-- 3: Options -->
 <div class="panel" id="p3">
   <h1>Transfer options</h1>
-  <p class="sub">Configure how your photos and videos are processed and organised.</p>
+  <p class="sub">Configure how your photos are processed and organised.</p>
   <div class="card">
     <div class="card-title">Processing</div>
-    <div class="toggle-row"><div><div class="tr-label">Fix photo/video dates and metadata</div><div class="tr-sub">Restores date taken, GPS location, descriptions, keywords, and orientation from Google's JSON sidecars. Videos require ffmpeg-python.</div></div><label class="toggle"><input type="checkbox" id="optMeta" checked><span class="tslider"></span></label></div>
+    <div class="toggle-row"><div><div class="tr-label">Fix photo dates from metadata</div><div class="tr-sub">Uses Google's JSON sidecar files to restore correct taken-date</div></div><label class="toggle"><input type="checkbox" id="optMeta" checked><span class="tslider"></span></label></div>
     <div class="toggle-row"><div><div class="tr-label">Deduplicate photos</div><div class="tr-sub">Skips exact duplicate files — common with Takeout album exports</div></div><label class="toggle"><input type="checkbox" id="optDedup" checked><span class="tslider"></span></label></div>
     <div class="toggle-row"><div><div class="tr-label">Skip files already on NAS</div><div class="tr-sub">Checks if a file exists before uploading — safe to re-run</div></div><label class="toggle"><input type="checkbox" id="optSkip" checked><span class="tslider"></span></label></div>
   </div>
@@ -216,12 +210,12 @@
 <div class="panel" id="p4">
   <h1>Transferring…</h1>
   <p class="sub">The Python server is extracting your zips and uploading via SFTP. Keep this window open.</p>
-  <div class="stat-grid">
+  <div class="stat-grid" style="grid-template-columns:repeat(5,1fr)">
     <div class="stat-card"><div class="stat-label">Total files</div><div class="stat-value" id="rTotal">0</div></div>
     <div class="stat-card"><div class="stat-label">Uploaded</div><div class="stat-value" id="rUp">0</div></div>
-    <div class="stat-card"><div class="stat-label">Photos</div><div class="stat-value" id="rPhotos" style="color:var(--blue)">0</div></div>
-    <div class="stat-card"><div class="stat-label">Videos</div><div class="stat-value" id="rVideos" style="color:var(--warn)">0</div></div>
+    <div class="stat-card"><div class="stat-label">EXIF fixed</div><div class="stat-value" id="rMeta" style="color:var(--blue)">0</div></div>
     <div class="stat-card"><div class="stat-label">Skipped</div><div class="stat-value" id="rSkip">0</div></div>
+    <div class="stat-card"><div class="stat-label">Speed</div><div class="stat-value" id="rSpeed" style="font-size:1.1rem;margin-top:.2rem">— MB/s</div></div>
   </div>
   <div class="progress-block">
     <div class="progress-label"><span id="phaseLabel">Starting…</span><span id="pctLabel">0%</span></div>
@@ -249,7 +243,7 @@
     <div class="guide-step"><div class="guide-num">1</div><div><div class="guide-text">Open <strong>Synology Photos</strong> on your NAS — your photos will appear indexed automatically.</div></div></div>
     <div class="guide-step"><div class="guide-num">2</div><div><div class="guide-text">Install <strong>Synology Photos</strong> on your phone and enable auto-backup for future photos.</div></div></div>
     <div class="guide-step"><div class="guide-num">3</div><div><div class="guide-text">Once confirmed, delete the Takeout zip files from your PC to free up space.</div></div></div>
-    <div class="guide-step"><div class="guide-num">4</div><div><div class="guide-text">You can now disable SFTP on the NAS again: DSM → Control Panel → File Services → FTP tab → SFTP section → uncheck Enable SFTP.</div></div></div>
+    <div class="guide-step"><div class="guide-num">4</div><div><div class="guide-text">You can now disable SSH on the NAS again: DSM → Control Panel → Terminal &amp; SNMP → uncheck Enable SSH.</div></div></div>
   </div>
   <div class="btn-row"><button class="btn btn-secondary" onclick="resetApp()">Start over</button></div>
 </div>
@@ -354,7 +348,6 @@ async function startTransfer() {
     nasPath: document.getElementById('nasPath').value.trim(),
     dedup:         document.getElementById('optDedup').checked,
     skipExisting:  document.getElementById('optSkip').checked,
-    meta:          document.getElementById('optMeta').checked,
     folderMode:    document.getElementById('optFolder').value
   };
   await fetch('/api/start', {
@@ -370,9 +363,9 @@ async function pollStatus() {
     const d = await r.json();
     document.getElementById('rTotal').textContent = d.total||0;
     document.getElementById('rUp').textContent    = d.uploaded||0;
-    document.getElementById('rPhotos').textContent  = d.photos_processed||0;
-    document.getElementById('rVideos').textContent  = d.videos_processed||0;
+    document.getElementById('rMeta').textContent  = d.meta_fixed||0;
     document.getElementById('rSkip').textContent  = d.skipped||0;
+    document.getElementById('rSpeed').textContent = d.last_speed_mbps ? d.last_speed_mbps + ' MB/s' : '— MB/s';
     document.getElementById('progBar').style.width = (d.pct||0)+'%';
     document.getElementById('pctLabel').textContent = Math.round(d.pct||0)+'%';
     document.getElementById('phaseLabel').textContent = d.phase||'…';
@@ -394,7 +387,7 @@ async function pollStatus() {
       const summary = document.getElementById('summaryBox');
       summary.innerHTML = d.error
         ? `Transfer ended with error: <strong>${d.error}</strong>. ${d.uploaded} uploaded, ${d.skipped} skipped, ${d.errors} errors.`
-        : `<strong>Success!</strong> ${d.uploaded} file(s) uploaded. Metadata restored on <strong>${d.photos_processed||0}</strong> photo(s) and <strong>${d.videos_processed||0}</strong> video(s). ${d.skipped} duplicate(s)/existing skipped. ${d.errors||0} error(s).`;
+        : `<strong>Success!</strong> ${d.uploaded} file(s) uploaded. EXIF metadata restored on <strong>${d.meta_fixed||0}</strong> file(s). ${d.skipped} duplicate(s)/existing skipped. ${d.errors||0} error(s).`;
     }
   } catch(e) { /* server briefly busy */ }
 }

@@ -8,14 +8,14 @@ Move your entire Google Photos library to a Synology NAS — with full EXIF meta
 
 - Extracts all Google Takeout `.zip` files directly (no manual unzipping)
 - Restores correct **date taken** and **GPS location** into each JPEG/PNG from Google's JSON sidecar files
-- **Video metadata embedding** — embeds creation dates and GPS into MP4, MOV, AVI, MKV videos (requires ffmpeg-python)
-- **Advanced HEIC/TIFF support** — restores metadata into HEIC (iPhone) and TIFF archival formats (requires Pillow)
-- Extracts and embeds **photo descriptions, keywords, orientation, and face recognition tags** from Google metadata
+- Restores **descriptions/captions**, **album keywords**, **orientation**, and **people/face tags** where available
 - Sets the file's **modified timestamp** on the NAS to match the original photo date
+- Embeds metadata into **videos** (creation time + GPS) using ffmpeg — optional, see Dependencies
 - **Deduplicates** photos (Google Takeout often exports the same photo twice when it appears in multiple albums)
 - Organises photos into **Year / Month** folders on the NAS automatically
 - Skips files already on the NAS so it's safe to re-run after an interruption
-- Live progress log in the browser with separate tracking for photos vs videos
+- Uploads with **4 parallel SFTP channels** for faster transfers
+- Live progress log in the browser
 
 ---
 
@@ -23,28 +23,26 @@ Move your entire Google Photos library to a Synology NAS — with full EXIF meta
 
 ### On your computer
 
-Python 3.8 or later is required on all platforms. Install the base dependencies once:
+Python 3.8 or later is required on all platforms. Install the required dependencies once:
 
 ```
 pip install paramiko piexif
 ```
 
-**Optional dependencies** (for advanced metadata handling):
+**Optional — for extended format support:**
 
 ```
-pip install ffmpeg-python pillow
+pip install ffmpeg-python   # video metadata embedding (creation time + GPS)
+pip install pillow          # TIFF metadata embedding
 ```
 
-- `ffmpeg-python` — required for embedding metadata into video files (MP4, MOV, AVI, MKV)
-- `pillow` — required for HEIC and TIFF metadata embedding
-- FFmpeg binary — download from [ffmpeg.org](https://ffmpeg.org/download.html) if you want video metadata support
+The wizard works without these — photos and videos still transfer, but video metadata and TIFF metadata embedding are skipped with a warning.
 
 #### Windows
 
 - Download Python from [python.org](https://python.org) if not already installed — tick **"Add Python to PATH"** during setup
 - Run the wizard from **PowerShell** or **Command Prompt**
 - Paste zip folder paths using backslashes: `C:\Users\You\Downloads\Takeout`
-- For video metadata: download FFmpeg from [ffmpeg.org](https://ffmpeg.org/download.html) and add the `bin` folder to your PATH
 
 #### macOS
 
@@ -52,7 +50,6 @@ pip install ffmpeg-python pillow
 - Run the wizard from **Terminal**
 - Paste zip folder paths using forward slashes: `/Users/you/Downloads/Takeout`
 - If `pip` is not found, try `pip3 install paramiko piexif`
-- For video metadata: install FFmpeg via `brew install ffmpeg`
 
 #### Linux
 
@@ -60,11 +57,10 @@ pip install ffmpeg-python pillow
 - Run the wizard from your **terminal**
 - Paste zip folder paths using forward slashes: `/home/you/Downloads/Takeout`
 - If pip is not found: `sudo apt install python3-pip`
-- For video metadata: install FFmpeg via `sudo apt install ffmpeg` (Debian/Ubuntu)
 
 ### On your Synology NAS
 
-- **SFTP enabled** — DSM → Control Panel → File Services → FTP tab → SFTP section → tick *Enable SFTP service* → Apply
+- **SSH enabled** — DSM → Control Panel → Terminal & SNMP → tick *Enable SSH service* → Apply (SFTP runs over SSH)
 - Your DSM user must have **Read/Write** permission on the destination shared folder — DSM → Control Panel → Shared Folder → select folder → Edit → Permission tab
 
 ---
@@ -73,7 +69,7 @@ pip install ffmpeg-python pillow
 
 | File | Purpose |
 |------|---------|
-| `sftp-run.py` | Python backend server — handles zip extraction, EXIF fixing, video metadata, and SFTP upload |
+| `sftp-run.py` | Python backend server — handles zip extraction, EXIF fixing, and SFTP upload |
 | `google-photos-to-nas.html` | Browser wizard UI — served automatically by the Python server |
 
 Both files must be in the **same folder**.
@@ -84,11 +80,11 @@ Both files must be in the **same folder**.
 
 ### Step 1 — Request your Google Takeout
 
-- Go to [takeout.google.com](https://takeout.google.com)
-- Click **Deselect all**, then tick only **Google Photos**
-- Click **Next step** → delivery: *Send download link via email* → format: `.zip` → size: **50 GB**
-- Click **Create export** and wait for Google's email (can take hours or days for large libraries)
-- Download all `.zip` files from the email into one folder on your computer — keep them zipped
+1. Go to [takeout.google.com](https://takeout.google.com)
+2. Click **Deselect all**, then tick only **Google Photos**
+3. Click **Next step** → delivery: *Send download link via email* → format: `.zip` → size: **50 GB**
+4. Click **Create export** and wait for Google's email (can take hours or days for large libraries)
+5. Download all `.zip` files from the email into one folder on your computer — keep them zipped
 
 > **Note:** Your Takeout will often be 1.5–2× larger than your Google storage shows, because photos that appear in multiple albums are exported multiple times. The wizard deduplicates them automatically.
 
@@ -112,12 +108,12 @@ Your browser will open automatically at `http://localhost:8000`. Keep the termin
 
 The wizard walks you through 6 steps:
 
-- **Guide** — pre-flight checklist (shown on first launch)
-- **Zip folder** — paste the path to your Takeout download folder and click Scan
-- **NAS setup** — enter your NAS IP, SSH port (default 22), username, password, and destination path
-- **Options** — toggle metadata fixing, deduplication, skip-existing, and folder structure. Video metadata requires ffmpeg-python.
-- **Transfer** — live log and progress bar while files upload. Separate counters for photos vs videos.
-- **Done** — summary and next steps
+1. **Guide** — pre-flight checklist (shown on first launch)
+2. **Zip folder** — paste the path to your Takeout download folder and click Scan
+3. **NAS setup** — enter your NAS IP, SSH port (default 22), username, password, and destination path
+4. **Options** — toggle deduplication, EXIF restoration, skip-existing, and folder structure
+5. **Transfer** — live log and progress bar while files upload
+6. **Done** — summary and next steps
 
 ---
 
@@ -140,29 +136,15 @@ The destination path must be the **real disk path** visible over SFTP, not the D
 | Shared folder `GooglePhotos` at `/volume1/GooglePhotos` | `Photos` *(if SFTP is chrooted to your home)* or `/volume1/GooglePhotos` |
 | Shared folder `photo` at `/volume1/photo` | `/volume1/photo/GooglePhotos` |
 
-**Tip:** Use the **Test SFTP connection** button on the NAS setup screen. It will connect, verify the path, and confirm write access before you start the full transfer. If the path is wrong, it will show diagnostic info.
+**Tip:** Use the **Test SFTP connection** button on the NAS setup screen. It will connect, verify the path, and confirm write access before you start the full transfer. If the path is wrong, it shows exactly what it can see so you can correct it.
 
-If you see `SFTP cwd='/', root listing: ['Photos']` in the error, your session is chrooted to your home folder — use `Photos` as the destination path, or change the SFTP root in DSM → Control Panel → User → Edit → Home folder.
+If you see `SFTP cwd='/', root listing: ['Photos']` in the error, your session is chrooted to your home folder — use `Photos` as the destination path, or change the SFTP root in DSM → Control Panel → File Services → FTP → Advanced Settings.
 
 ---
 
-## Metadata restoration
+## EXIF metadata restoration
 
-Google Takeout strips the original date and GPS location from photo files and stores them separately in `.json` sidecar files. The wizard restores all this metadata automatically.
-
-### What gets restored per file type
-
-| Format | Date Taken | GPS coordinates | Description | Keywords | Orientation | Face Tags |
-|--------|-----------|-----------------|-------------|----------|-------------|-----------|
-| JPEG / JPG | ✅ EXIF embedded | ✅ EXIF embedded | ✅ EXIF | ✅ EXIF | ✅ EXIF | ✅ User comment |
-| PNG | ✅ tEXt chunk | — | ✅ tEXt | ✅ tEXt | ✅ tEXt | ✅ tEXt |
-| HEIC / iPhone | ✅ EXIF | ✅ EXIF | ✅ EXIF | ✅ Keywords | ✅ Orientation | ⚠ Limited |
-| TIFF / Archive | ✅ EXIF | ✅ EXIF | ✅ EXIF | ✅ Keywords | ✅ EXIF | ⚠ Limited |
-| MP4 / MOV | ✅ creation_time | ⚠ format-limited | — | — | — | — |
-| AVI / MKV | ✅ creation_time | ⚠ format-limited | — | — | — | — |
-| Video (other) | — needs manual | — | — | — | — | — |
-
-### Technical notes
+Google Takeout strips the original date and GPS location from photo files and stores them separately in `.json` sidecar files. Without restoration, all your photos appear to have been taken on the day you exported them.
 
 The wizard handles all Google's sidecar naming formats:
 
@@ -173,9 +155,31 @@ The wizard handles all Google's sidecar naming formats:
 | Long filenames | Truncated to 46 characters |
 | Some exports | `photo.jpg.supplemental-metadata.json` |
 
-**Video metadata embedding** uses FFmpeg's lossless metadata injection (`-c copy` codec flags), so no re-encoding happens — videos transfer at full speed.
+What gets restored per file type:
 
-**HEIC/TIFF support** requires Pillow (PIL). If not installed, these formats will be skipped with a warning in the log.
+| Format | Date Taken | GPS coordinates | File modified time | Extended metadata |
+|--------|-----------|-----------------|-------------------|------------------|
+| JPEG / JPG | ✅ EXIF embedded | ✅ EXIF embedded | ✅ | ✅ description, keywords, orientation, people |
+| PNG | ✅ tEXt chunk | — | ✅ | ✅ description, keywords, orientation, people |
+| TIFF | ✅ Pillow required | ✅ Pillow required | ✅ | ✅ description, orientation |
+| HEIC / HEIF | ⚠ Logged, needs manual tool | — | ✅ | — |
+| Video (MP4, MOV, etc.) | ✅ ffmpeg required | ✅ ffmpeg required | ✅ | — |
+
+Extended metadata includes descriptions/captions, album keywords, EXIF orientation, and people/face tag data from Google's JSON sidecars.
+
+For HEIC files, the wizard logs which files need attention — you can use [ExifTool](https://exiftool.org) afterwards to fix those if needed.
+
+For TIFF and video metadata, install the optional packages: `pip install pillow ffmpeg-python`.
+
+---
+
+## Folder structure options
+
+| Option | Result on NAS |
+|--------|--------------|
+| Year / Month | `GooglePhotos/2022/06/photo.jpg` |
+| Year only | `GooglePhotos/2022/photo.jpg` |
+| Flat | `GooglePhotos/photo.jpg` |
 
 ---
 
@@ -187,7 +191,7 @@ The wizard handles all Google's sidecar naming formats:
 
 **"Authentication failed"**
 - Double-check your DSM username and password
-- Make sure SFTP is enabled (not just SSH) in DSM → File Services → FTP → SFTP
+- Make sure SSH is enabled in DSM → Control Panel → Terminal & SNMP → Enable SSH service
 
 **"Folder not found" on scan**
 - Windows: use backslashes — `C:\Users\You\Downloads\Takeout`
@@ -199,7 +203,7 @@ The wizard handles all Google's sidecar naming formats:
 - On macOS you may need to install Python via [python.org](https://python.org) or `brew install python`
 
 **`pip` command not found**
-- Try `pip3 install paramiko piexif` (and `ffmpeg-python pillow` for optional features)
+- Try `pip3 install paramiko piexif`
 - On Linux: `sudo apt install python3-pip` then retry
 
 **Browser doesn't open automatically**
@@ -211,40 +215,37 @@ The wizard handles all Google's sidecar naming formats:
 **EXIF not restored on some files**
 - The wizard logs `No sidecar found for: filename.jpg` when Google didn't include a JSON for that file
 - This can happen with photos synced from other apps — the original date may already be embedded in the file
-- For videos without metadata, the wizard logs a warning; consider using external tools like ExifTool if manual tagging is needed
 
-**ffmpeg not found (video metadata)**
-- Install FFmpeg: Windows ([ffmpeg.org](https://ffmpeg.org/download.html)), macOS (`brew install ffmpeg`), Linux (`sudo apt install ffmpeg`)
-- Verify it's in your PATH by running `ffmpeg -version` in terminal
-- Without ffmpeg, the wizard will log warnings and skip video metadata
+**Video metadata not embedded**
+- Install the optional package: `pip install ffmpeg-python`
+- If already installed and still not working, check the terminal for ffmpeg errors
 
-**Pillow import error (HEIC/TIFF)**
-- Install Pillow: `pip install pillow` (or `pip3` on macOS/Linux)
-- Without Pillow, HEIC and TIFF files will be transferred but metadata won't be embedded — log will show warnings
+**TIFF metadata not embedded**
+- Install the optional package: `pip install pillow`
 
 ---
 
 ## After the transfer
 
-- Open **Synology Photos** on your NAS — your library will be indexed automatically
-- Install the **Synology Photos** app on your phone (Android / iOS) and enable auto-backup so new photos go straight to the NAS going forward
-- Once you've verified everything looks correct on the NAS, delete the Takeout zip files from your computer to free up space
-- Consider cancelling your Google One subscription if you were paying for extra storage
+1. Open **Synology Photos** on your NAS — your library will be indexed automatically
+2. Install the **Synology Photos** app on your phone (Android / iOS) and enable auto-backup so new photos go straight to the NAS going forward
+3. Once you've verified everything looks correct on the NAS, delete the Takeout zip files from your computer to free up space
+4. You can now disable SSH on the NAS again: DSM → Control Panel → Terminal & SNMP → uncheck *Enable SSH service*
+5. Consider cancelling your Google One subscription if you were paying for extra storage
 
 ---
 
 ## Dependencies
 
-| Package | Purpose | Required? |
-|---------|---------|-----------|
-| `paramiko` | SFTP connection to Synology NAS | **Yes** |
-| `piexif` | Read and write EXIF metadata in JPEG files | **Yes** |
-| `ffmpeg-python` | Embed metadata into video files | Optional — videos will be skipped if missing |
-| `pillow` (PIL) | HEIC and TIFF metadata embedding | Optional — these formats will be skipped if missing |
-| FFmpeg binary | Required by ffmpeg-python for video processing | Optional — only if you want video metadata |
+| Package | Purpose | Required |
+|---------|---------|---------|
+| `paramiko` | SFTP connection to Synology NAS | ✅ Required |
+| `piexif` | Read and write EXIF metadata in JPEG/TIFF files | ✅ Required |
+| `ffmpeg-python` | Embed metadata into video files | Optional |
+| `pillow` | Embed metadata into TIFF files | Optional |
 
-Install core dependencies with: `pip install paramiko piexif`
+Install required packages: `pip install paramiko piexif`
 
-Install all optional dependencies with: `pip install ffmpeg-python pillow`
+Install all packages including optional: `pip install paramiko piexif ffmpeg-python pillow`
 
-(On macOS/Linux, use `pip3` if `pip` isn't in your PATH)
+(Use `pip3` on macOS/Linux if `pip` is not found.)
